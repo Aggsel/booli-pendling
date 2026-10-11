@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.3.0
+// @version      1.4.0
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -227,12 +227,28 @@
 
   // One in-memory copy of the cache, written through to storage, so parallel lookups don't overwrite each other.
   let cacheMem = null;
-  async function cached(key, fn) {
-    key = CACHE_NS + key;
+  function loadCache() {
     if (!cacheMem) {
       cacheMem = GM_getValue('cache', {});
       for (const k of Object.keys(cacheMem)) if (!k.startsWith(CACHE_NS) || Date.now() - cacheMem[k].t > CACHE_TTL) delete cacheMem[k];
     }
+  }
+  // Read or write a value directly, without a lookup function.
+  function cacheGet(key) {
+    loadCache();
+    const hit = cacheMem[CACHE_NS + key];
+    return hit && Date.now() - hit.t < CACHE_TTL ? hit.v : null;
+  }
+  function cachePut(key, v) {
+    loadCache();
+    const k = CACHE_NS + key;
+    if (cacheMem[k] && JSON.stringify(cacheMem[k].v) === JSON.stringify(v)) return; // unchanged, skip the write
+    cacheMem[k] = { t: Date.now(), v };
+    GM_setValue('cache', cacheMem);
+  }
+  async function cached(key, fn) {
+    key = CACHE_NS + key;
+    loadCache();
     const hit = cacheMem[key];
     if (hit && Date.now() - hit.t < CACHE_TTL) return JSON.parse(JSON.stringify(hit.v));
     const v = await fn();
@@ -1271,6 +1287,7 @@
           return;
         }
         el.style.display = '';
+        if (i === 0 && state.status === 'done') saveSummary(listingId(), state, c);
         const v = kpiValue(el._spec, state, c);
         updateFact(el, v.value, v.extra + (isLast ? CHEV(open) : ''), open,
           `${el._spec.label} ${v.value}${v.delta ? `, ${v.delta.short}` : ''}${v.title ? `, ${v.title}` : ''}. Visa detaljer`, v.delta);
@@ -1388,12 +1405,30 @@
     if (title) el.title = title;
   }
 
+  // A listing's card values are saved per listing and settings, so lists can show them later without any lookups.
+  function settingsSig(c) {
+    const str = JSON.stringify({ ...c, apiKey: '' });
+    let h = 5381;
+    for (let i = 0; i < str.length; i++) h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
+    return h.toString(36);
+  }
+  function summaryOf(st, c) {
+    const items = kpiSpecs(c).map((sp) => kpiValue(sp, st, c));
+    if (items.some((v) => v.value === '…')) return null; // not complete yet
+    return items.map((v) => ({ card: v.card, extra: v.extra || '', title: v.title || '' }));
+  }
+  const saveSummary = (id, st, c) => {
+    const sum = summaryOf(st, c);
+    if (sum) cachePut(`sum:${id}:${settingsSig(c)}`, sum);
+  };
+  const savedSummary = (id, c, sig = settingsSig(c)) => cacheGet(`sum:${id}:${sig}`);
+
   const cardJobs = new Map(); // listing id -> promise of { r, sc }
   function cardCommute(id, url) {
     if (!cardJobs.has(id)) {
       cardJobs.set(id, (async () => {
         const c = cfg();
-        const p = await getListingCoords(id, null, url);
+        const p = await cached(`pos:${id}`, () => getListingCoords(id, null, url));
         if (!p) throw new Error('Ingen position');
         const r = await evaluate(p, c);
         const needEv = c.kpis.some((k) => ['grocery', 'school', 'car'].includes(k));
@@ -1401,38 +1436,114 @@
           needEv ? everydayFor(p, c) : null,
           c.home && c.showTodayDelta && c.kpis.includes('commute') ? todayBase(c) : null,
         ]);
-        return { r, sc: score(r, c), ev, today };
+        const res = { r, sc: score(r, c), ev, today };
+        saveSummary(id, { status: 'done', ...res }, c);
+        return res;
       })().catch((e) => { cardJobs.delete(id); throw e; }));
     }
     return cardJobs.get(id);
   }
 
+  // Put our values into a card's facts line, then fill them in when the calculation is done.
+  function fillCard(line, id, url, c) {
+    const specs = kpiSpecs(c);
+    const items = specs.map((sp) => { const el = makeCardItem(line); if (el) el._spec = sp; return el; });
+    if (!items.length || items.some((e) => !e)) return false;
+    for (const el of items) {
+      el.setAttribute('data-bcs-card', id);
+      line.appendChild(el);
+    }
+    const saved = savedSummary(id, c);
+    if (saved && saved.length === items.length) {
+      items.forEach((el, i) => setCardItem(el, saved[i].card, saved[i].extra, saved[i].title));
+      return true;
+    }
+    for (const el of items) setCardItem(el, kpiValue(el._spec, { status: 'loading' }, c).card);
+    cardCommute(id, url).then((res) => {
+      for (const el of items) {
+        if (!el.isConnected) continue;
+        const v = kpiValue(el._spec, { status: 'done', ...res }, c);
+        setCardItem(el, v.card, v.extra, v.title);
+      }
+    }).catch(() => {
+      for (const el of items) if (el.isConnected) setCardItem(el, kpiValue(el._spec, { status: 'error' }, c).card);
+    });
+    return true;
+  }
+
+  // Map popups calculate straight away: you opened that one house on purpose.
   function decorateCards() {
     const c = cfg();
     if (!c.apiKey) return;
     const specs = kpiSpecs(c);
     for (const { card, id, url } of findPopupCards()) {
+      card.setAttribute('data-bcs-popup', '');
       const existing = [...card.querySelectorAll('[data-bcs-card]')];
       if (existing.length === specs.length && existing.every((e) => e.dataset.bcsCard === id)) continue;
       existing.forEach((e) => e.remove()); // the card switched to another house
+      card.querySelectorAll('[data-bcs-btn]').forEach((b) => b.remove());
       const line = findCardFactsLine(card);
-      if (!line) continue;
-      const items = specs.map((sp) => { const el = makeCardItem(line); if (el) el._spec = sp; return el; });
-      if (!items.length || items.some((e) => !e)) continue;
-      for (const el of items) {
-        el.setAttribute('data-bcs-card', id);
-        line.appendChild(el);
-        setCardItem(el, kpiValue(el._spec, { status: 'loading' }, c).card);
-      }
-      cardCommute(id, url).then((res) => {
-        for (const el of items) {
-          if (!el.isConnected) continue;
-          const v = kpiValue(el._spec, { status: 'done', ...res }, c);
-          setCardItem(el, v.card, v.extra, v.title);
+      if (line) fillCard(line, id, url, c);
+    }
+    decorateListCards(c);
+  }
+
+  // Result lists: each card gets a small "Visa pendling" button, so nothing is fetched until you ask.
+  // Houses you've already looked at show their values straight away, from saved results.
+  function findListCards() {
+    const out = [];
+    const seen = new Set();
+    for (const a of document.querySelectorAll('a[href]')) {
+      const m = (a.getAttribute('href') || '').match(LISTING_HREF);
+      if (!m || seen.has(a)) continue;
+      const id = m[1];
+      if (location.pathname.includes(`/${id}`)) continue; // the listing page's own house
+      let el = a;
+      for (let depth = 0; el && el !== document.body && depth < 8; depth++, el = el.parentElement) {
+        const ids = new Set([...el.querySelectorAll('a[href]')].map((x) => ((x.getAttribute('href') || '').match(LISTING_HREF) || [])[1]).filter(Boolean));
+        if (ids.size > 1) break; // climbed into the list itself
+        const line = findCardFactsLine(el);
+        if (line) {
+          el.querySelectorAll('a[href]').forEach((x) => seen.add(x));
+          out.push({ card: el, line, id, url: new URL(a.getAttribute('href'), location.href).href });
+          break;
         }
-      }).catch(() => {
-        for (const el of items) if (el.isConnected) setCardItem(el, kpiValue(el._spec, { status: 'error' }, c).card);
+      }
+    }
+    return out;
+  }
+
+  const BTN_CSS = 'display:inline-flex;align-items:center;gap:.3em;margin-left:.6em;padding:.15em .7em;border:1px solid #cfcecb;' +
+    'border-radius:999px;background:#fff;color:#1b1b1b;font:inherit;font-size:.85em;line-height:1.6;cursor:pointer;vertical-align:middle;white-space:nowrap;';
+
+  function decorateListCards(c) {
+    const sig = settingsSig(c);
+    for (const { card, line, id, url } of findListCards()) {
+      if (card.closest('[data-bcs-popup]') || card.querySelector('[data-bcs-popup]')) continue;
+      const existing = [...line.querySelectorAll('[data-bcs-card]')];
+      if (existing.length && existing.every((e) => e.dataset.bcsCard === id)) continue; // already filled
+      existing.forEach((e) => e.remove());
+      const btn = line.querySelector('[data-bcs-btn]');
+      if (savedSummary(id, c, sig) || cardJobs.has(id)) { // values already known: show them, no lookups needed
+        if (btn) btn.remove();
+        fillCard(line, id, url, c);
+        continue;
+      }
+      if (btn && btn.dataset.bcsBtn === id) continue; // button already there
+      if (btn) btn.remove();
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.setAttribute('data-bcs-btn', id);
+      b.style.cssText = BTN_CSS;
+      b.innerHTML = '<span aria-hidden="true">🚆</span>Visa pendling';
+      b.setAttribute('aria-label', 'Visa pendling för den här bostaden');
+      b.addEventListener('click', (e) => {
+        e.preventDefault(); // the card is usually a link to the listing
+        e.stopPropagation();
+        b.remove();
+        fillCard(line, id, url, c);
       });
+      line.appendChild(b);
     }
   }
 
