@@ -28,7 +28,7 @@ async function readStatic(dir) {
   await eachRow(dir, 'stops.txt', (r, c) => {
     const id = r[c.stop_id];
     stopIdx.set(id, stops.length);
-    stops.push({ id, name: (r[c.stop_name] || '').trim(), lat: +r[c.stop_lat], lon: +r[c.stop_lon],
+    stops.push({ id, name: (r[c.stop_name] || '').trim().normalize('NFC'), lat: +r[c.stop_lat], lon: +r[c.stop_lon],
       parent: c.parent_station != null ? r[c.parent_station] || '' : '', type: c.location_type != null ? +r[c.location_type] || 0 : 0 });
   });
   const routes = new Map();
@@ -149,14 +149,22 @@ function footpaths(stops, used, transfers) {
   return { foot, changeTime };
 }
 
-function destinationStops(stops, pattern) {
-  const re = new RegExp(pattern);
-  const matched = stops.map((s, i) => i).filter((i) => re.test(stops[i].name));
+// The destination's stops: by name, or else every stop within `radius` metres of its coordinates.
+function destinationStops(stops, d, log) {
+  const re = new RegExp(d.stopNamePattern.normalize('NFC'), 'i');
+  let matched = stops.map((s, i) => i).filter((i) => re.test(stops[i].name));
+  if (!matched.length && d.lat != null) {
+    const near = stops.map((s, i) => [i, metres(d, s)]).sort((a, b) => a[1] - b[1]);
+    matched = near.filter(([, m]) => m <= (d.radius || 200)).map(([i]) => i);
+    if (matched.length) log(`${d.name}: inget namn matchar ${d.stopNamePattern}, använder hållplatserna inom ${d.radius || 200} m`);
+    else log(`${d.name}: närmaste hållplatser är ${near.slice(0, 10).map(([i, m]) => `${stops[i].name} (${Math.round(m)} m)`).join(', ')}`);
+  }
   if (!matched.length) return null;
   const ids = new Set(matched.map((i) => stops[i].id));
   const all = stops.map((s, i) => i).filter((i) => ids.has(stops[i].id) || ids.has(stops[i].parent));
   const main = matched.find((i) => stops[i].type === 1) ?? matched[0];
-  return { stops: all, main: stops[main] };
+  log(`${d.name}: ${all.length} hållplatser (${[...new Set(all.map((i) => stops[i].name))].join(', ')})`);
+  return { stops: all, main: d.lat != null ? { lat: d.lat, lon: d.lon } : stops[main] };
 }
 
 const hhmm = (t) => `${String(Math.floor(t / H) % 24).padStart(2, '0')}:${String(Math.floor((t % H) / 60)).padStart(2, '0')}`;
@@ -182,7 +190,7 @@ export async function buildTables(dir, config, opts) {
 
   const used = new Set();
   for (const cs of [morning, evening]) for (let i = 0; i < cs.n; i++) { used.add(cs.from[i]); used.add(cs.to[i]); }
-  const dests = config.destinations.map((d) => ({ d, found: destinationStops(feed.stops, d.stopNamePattern) }));
+  const dests = config.destinations.map((d) => ({ d, found: destinationStops(feed.stops, d, log) }));
   for (const { d, found } of dests) {
     if (!found) throw new Error(`Hittade ingen hållplats för ${d.name} (${d.stopNamePattern})`);
     for (const s of found.stops) used.add(s);

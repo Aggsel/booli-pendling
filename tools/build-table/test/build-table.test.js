@@ -54,6 +54,12 @@ test('the destination itself is not a row', () => {
   assert.equal(row('Göteborg Centralstation'), undefined);
 });
 
+test('destination found by coordinates when no name matches', async () => {
+  const [{ table: t }] = await buildTables(fixture, { ...config, destinations: [{ key: 'gbg-c', name: 'Göteborg C', stopNamePattern: '^Finns inte',
+    lat: 57.7089, lon: 11.9735, radius: 200 }] }, { today: '2026-10-11', source: 'test' });
+  assert.equal(t.stops.find((r) => r[6] === 'Alfa station')[2], 30);
+});
+
 test('unknown destination fails loudly', async () => {
   await assert.rejects(buildTables(fixture, { ...config, destinations: [{ key: 'x', name: 'X', stopNamePattern: '^Finns inte' }] },
     { today: '2026-10-11', source: 'test' }), /Hittade ingen hållplats/);

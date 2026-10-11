@@ -4,7 +4,7 @@
   "arriveBy": "08:00",
   "maxMinutes": 120,
   "destinations": [
-    { "key": "gbg-c", "name": "Göteborg Centralstation", "stopNamePattern": "^Göteborg Centralstation" }
+    { "key": "gbg-c", "name": "Göteborg Centralstation", "stopNamePattern": "^Göteborg Centralstation", "lat": 57.7089, "lon": 11.9735, "radius": 200 }
   ],
   "spotCheck": [
     "Mölndal station", "Lindome station", "Kungsbacka station", "Partille station", "Lerum station",
