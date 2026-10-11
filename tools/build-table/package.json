@@ -1,0 +1,11 @@
+{
+  "name": "build-table",
+  "private": true,
+  "type": "module",
+  "description": "Weekly travel-time table to a destination, from a GTFS feed",
+  "scripts": {
+    "build": "node build.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": { "node": ">=20" }
+}

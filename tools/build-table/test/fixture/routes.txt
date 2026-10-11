@@ -1,0 +1,4 @@
+route_id,route_short_name,route_type
+R_TRAIN,Tåg,2
+R_TRAM,1,900
+R_BUS,100,700

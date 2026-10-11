@@ -1,0 +1,9 @@
+stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station
+C,Göteborg Centralstation,57.70890,11.97350,1,
+C1,Göteborg Centralstation,57.70900,11.97300,0,C
+A,Alfa station,57.65000,12.01000,0,
+B,Beta station,57.60000,12.05000,0,
+X,Xen,57.55000,12.10000,0,
+M,Miss,57.55000,12.20000,0,
+N,Nattby,57.80000,12.10000,0,
+H,Helgby,57.75000,11.80000,0,

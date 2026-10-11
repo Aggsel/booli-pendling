@@ -6,6 +6,7 @@ Se restiden till jobbet direkt på Booli. Skriptet lägger till **Pendling** och
 - Sista resan hem på kvällen
 - Närmaste matbutik, skola och förskola, och körtid i rusning
 - Fungerar i hela Sverige
+- I sökresultaten: ungefärlig restid till Göteborg C för varje bostad, filter på längsta restid och sortering efter pendling. Det fungerar utan nyckel och gör inga anrop till Trafiklab.
 
 ## Installera
 
@@ -25,13 +26,23 @@ Tampermonkey letar efter nya versioner automatiskt och installerar dem. Dina ins
 - Allt du ställer in, även din nuvarande adress, sparas bara i din webbläsare.
 - Adressen skickas en gång till OpenStreetMap för att hitta platsen när du sparar den.
 - Bostadens position skickas till Trafiklab och OpenStreetMap för att räkna ut restider. Inget skickas till Booli eller till någon annan.
+- Restiderna i listorna räknas i din webbläsare, från en tidtabell som hämtas från det här repot en gång i veckan.
 
 ## Data
 
 - Kollektivtrafik: [Trafiklab](https://www.trafiklab.se) (ResRobot)
+- Restidstabell: Trafiklab (Samtrafiken), GTFS Regional
 - Gång-, cykel- och bilvägar, butiker, skolor och adresser: © [OpenStreetMap](https://www.openstreetmap.org/copyright)-bidragsgivare
 
 Körtid i rusning är en uppskattning. Närmaste skola betyder inte att ni får plats där.
+
+## Restidstabellen
+
+Listornas restider kommer från `data/travel-times-gbg-c.json`. GitHub Actions bygger den varje måndag (`.github/workflows/travel-times.yml`) från Västtrafiks tidtabell, med skriptet i `tools/build-table/`: för varje hållplats den senaste avgången som är framme vid Göteborg C 08:00 en vanlig tisdag, och sista resan hem på kvällen.
+
+- Repot behöver hemligheten `GTFS_KEY` (nyckel för GTFS Regional från Trafiklab). Med `RESROBOT_KEY` jämförs tabellen också med ResRobot i jobbets logg.
+- Fler resmål läggs till i `tools/build-table/config.json`.
+- Tester: `npm install` och sedan `npm test`.
 
 ## Något fungerar inte?
 

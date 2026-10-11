@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.4.0
+// @version      1.5.0
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -20,6 +20,7 @@
 // @connect      overpass.kumi.systems
 // @connect      overpass.private.coffee
 // @connect      nominatim.openstreetmap.org
+// @connect      raw.githubusercontent.com
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -34,6 +35,12 @@
   const OSRM = 'https://routing.openstreetmap.de';
   const CACHE_TTL = 7 * 24 * 3600 * 1000;
   const CACHE_NS = 'v4:'; // bump when cached data changes shape
+  // Weekly travel-time tables, published by the repository's GitHub Action (tools/build-table), for result lists.
+  const TABLE_BASE = 'https://raw.githubusercontent.com/Aggsel/booli-pendling/main/data/';
+  const TABLES = [{ key: 'gbg-c', label: 'Göteborg C', name: 'Göteborg Centralstation', lat: 57.7089, lon: 11.9735 }];
+  const TABLE_TTL = 7 * 24 * 3600 * 1000;
+  const TABLE_STALE_DAYS = 21;
+  const LIST_MAXES = [20, 30, 40, 50, 60];
 
   // ResRobot request product classes (trafiklab.se/api/our-apis/resrobot-v21/common)
   const MODES = [
@@ -134,6 +141,7 @@
     showTodayDelta: true,
     everyday: { grocery: { on: true, mode: 'bike' }, school: { on: true, mode: 'walk' }, car: { on: true } },
     destinations: [{ name: 'Göteborg Centralstation', id: '740000002', lat: 57.708895, lon: 11.973479, ...DEFAULT_DEST }],
+    list: { table: 'gbg-c', max: 0, over: 'dim', sort: false }, // result lists: table key or 'off', max minutes (0 = all)
   };
 
   function cfg() {
@@ -141,6 +149,7 @@
     if (saved.departTime && !saved.time) { saved.time = saved.departTime; saved.timeMode = 'depart'; }
     const c = Object.assign({}, DEFAULTS, saved);
     c.weights = Object.assign({}, DEFAULTS.weights, saved.weights || {});
+    c.list = Object.assign({}, DEFAULTS.list, saved.list || {});
     c.details = Object.assign({}, DEFAULTS.details, saved.details || {});
     c.everyday = {
       grocery: { ...DEFAULTS.everyday.grocery, ...((saved.everyday || {}).grocery || {}) },
@@ -621,6 +630,224 @@
     return jsonFallback;
   }
 
+  // One position lookup per listing, shared by map popups, list cards and the exact calculation.
+  const posJobs = new Map();
+  function listingPos(id, url) {
+    if (!posJobs.has(id)) {
+      posJobs.set(id, cached(`pos:${id}`, () => getListingCoords(id, null, url)).catch(() => null)
+        .then((p) => { listPos.set(id, p || null); return p; }));
+    }
+    return posJobs.get(id);
+  }
+
+  // =====================================================================
+  // Travel-time table: approximate commutes for lists, without any API calls
+  // =====================================================================
+  const KM_LAT = 111.2;
+  const ACCESS_RADIUS_KM = 3;
+  const tableMem = new Map(); // key → index, or null while there is none
+  const tableJobs = new Map();
+  const tablesFailed = new Set(); // no copy at all: fetch failed and nothing stored
+  let onTableLoaded = () => {};
+
+  // List of stops plus a grid of ~1 km cells, for fast lookups around a position.
+  function indexTable(data) {
+    if (!data || data.version !== 1 || !Array.isArray(data.stops) || !Array.isArray(data.fields) || !data.destination) return null;
+    const f = Object.fromEntries(data.fields.map((k, i) => [k, i]));
+    const kmLon = KM_LAT * Math.cos((data.destination.lat * Math.PI) / 180);
+    const grid = new Map();
+    const stops = data.stops.map((r) => ({
+      lat: r[f.lat], lon: r[f.lon], min: r[f.min], chg: r[f.chg] || 0, modes: r[f.modes] || '', last: r[f.last] ?? null, name: r[f.name] || '',
+    }));
+    for (const s of stops) {
+      const k = `${Math.floor(s.lat * KM_LAT)},${Math.floor(s.lon * kmLon)}`;
+      (grid.get(k) || grid.set(k, []).get(k)).push(s);
+    }
+    const ageDays = Math.floor((Date.now() - new Date(data.generated).getTime()) / 86400000);
+    return { data, stops, grid, kmLon, dest: data.destination, ageDays, stale: ageDays > TABLE_STALE_DAYS };
+  }
+
+  // The stored table, right away. Fetched on first use and then once a week; a failed fetch keeps the stored copy.
+  function tableNow(key) {
+    if (!tableMem.has(key)) {
+      const stored = GM_getValue(`table:${key}`, null);
+      const idx = stored ? indexTable(stored.data) : null;
+      tableMem.set(key, idx);
+      if (!idx || Date.now() - stored.t > TABLE_TTL) refreshTable(key);
+    }
+    return tableMem.get(key);
+  }
+  function refreshTable(key) {
+    if (!tableJobs.has(key)) {
+      tableJobs.set(key, gmJson(`${TABLE_BASE}travel-times-${key}.json`).then((data) => {
+        const idx = indexTable(data);
+        if (!idx) throw new Error('Okänd tabell');
+        GM_setValue(`table:${key}`, { t: Date.now(), data });
+        tableMem.set(key, idx);
+        onTableLoaded();
+        return idx;
+      }).catch(() => {
+        const idx = tableMem.get(key) || null;
+        if (!idx) { tablesFailed.add(key); onTableLoaded(); } // nothing to show: fall back to the old per-card button
+        return idx;
+      }));
+    }
+    return tableJobs.get(key);
+  }
+
+  // The table to use: the chosen one, if its destination is one of your resmål (or your main one, with main = true).
+  // Returns the index, 'loading' while the first copy is on its way, or null when list estimates are off.
+  function tableFor(c, main = false) {
+    const meta = TABLES.find((t) => t.key === c.list.table);
+    if (!meta) return null;
+    const near = (d) => d.lat && haversineKm(d, meta) < 0.5;
+    const ok = main ? c.destinations.length && near(c.destinations.slice().sort((a, b) => (b.weight || 1) - (a.weight || 1))[0]) : c.destinations.some(near);
+    if (!ok) return null;
+    const idx = tableNow(meta.key);
+    if (idx) return idx;
+    return tablesFailed.has(meta.key) ? null : 'loading';
+  }
+  const tableLabel = (c) => (TABLES.find((t) => t.key === c.list.table) || {}).label || '';
+
+  // Approximate commute from any position: walk or cycle (straight line × 1.3) to a stop in the table, plus that
+  // stop's minutes; or walk or cycle the whole way. No network calls.
+  function estimate(p, c, t) {
+    if (!p || !t || typeof t !== 'object') return null;
+    let best = null;
+    const consider = (o) => { if (!best || o.mins < best.mins) best = o; };
+    const cy = Math.floor(p.lat * KM_LAT), cx = Math.floor(p.lon * t.kmLon), r = Math.ceil(ACCESS_RADIUS_KM);
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      for (const s of t.grid.get(`${cy + dy},${cx + dx}`) || []) {
+        const km = haversineKm(p, s);
+        if (km > ACCESS_RADIUS_KM) continue;
+        const via = { via: s.name, chg: s.chg, modes: s.modes, last: s.last, ride: s.min };
+        const walk = minsAt(km * 1.3, c.walkSpeed);
+        if (walk <= c.accessMax) consider({ mins: walk + s.min, access: { how: 'walk', mins: walk }, ...via });
+        if (c.accessModes.bike) {
+          const bike = minsAt(km * 1.3, c.bikeSpeed);
+          if (bike <= c.accessMax) consider({ mins: bike + c.stationBuffer + s.min, access: { how: 'bike', mins: bike }, ...via });
+        }
+      }
+    }
+    const km = haversineKm(p, t.dest) * 1.3;
+    for (const [how, on, kmh] of [['walk', c.accessModes.walk, c.walkSpeed], ['bike', c.accessModes.bike, c.bikeSpeed]]) {
+      const mins = minsAt(km, kmh);
+      if (on && mins <= c.directMax) consider({ mins, access: { how, mins }, direct: true, via: null, chg: 0, modes: '', last: null });
+    }
+    return best;
+  }
+
+  const MONTHS = ['jan', 'feb', 'mars', 'apr', 'maj', 'juni', 'juli', 'aug', 'sep', 'okt', 'nov', 'dec'];
+  const fmtDay = (s) => { const [y, m, d] = String(s).split('-').map(Number); return `${d} ${MONTHS[m - 1]} ${y}`; };
+  const TABLE_ICON = { t: ICON.train, s: ICON.tram, b: ICON.bus, f: ICON.ferry };
+  const estText = (e, c) => (e ? `ca ${e.mins} min till ${tableLabel(c)}` : 'pendling okänd');
+  function estTitle(e, t, c) {
+    if (!e) return `Ingen hållplats eller väg inom räckhåll i tidtabellen till ${t.dest.name}.`;
+    const way = (a) => (a.how === 'bike' ? 'Cykla' : 'Gå');
+    const parts = [];
+    if (e.direct) parts.push(`${way(e.access)} hela vägen, ${e.access.mins} min`);
+    else {
+      parts.push(`${way(e.access)} ${e.access.mins} min till ${e.via}${e.access.how === 'bike' && c.stationBuffer ? `, ${c.stationBuffer} min att parkera` : ''}`);
+      parts.push(`sedan ${e.ride} min ${[...e.modes].map((m) => TABLE_ICON[m] || '').join('')} ${e.chg ? changesText(e.chg) : 'direkt'}`.replace(/\s+/g, ' '));
+      if (e.last) parts.push(`sista resan hem ${e.last}`);
+    }
+    parts.push(`Uppskattning från tidtabellen ${fmtDay(t.data.serviceDate)}, framme ${t.data.arriveBy}`);
+    return parts.join('. ') + '.';
+  }
+
+  // ---------- positions for result-list cards ----------
+  // Booli's result pages carry the listings' data for the map. Pick out each listing's position from it.
+  function positionsIn(doc, ids) {
+    const want = new Set(ids);
+    const found = new Map();
+    const visit = (root) => (function walk(o, depth) {
+      if (!o || typeof o !== 'object' || depth > 60 || found.size === want.size) return;
+      if (!Array.isArray(o)) {
+        for (const k of ['booliId', 'listingId', 'id']) {
+          const v = o[k];
+          if ((typeof v !== 'string' && typeof v !== 'number') || !want.has(String(v)) || found.has(String(v))) continue;
+          const c = findCoords(o, String(v));
+          if (c && c.sure) found.set(String(v), { lat: c.lat, lon: c.lon, sure: true });
+        }
+      }
+      for (const v of Object.values(o)) walk(v, depth + 1);
+    })(root, 0);
+    for (const s of doc.querySelectorAll('script')) {
+      const t = s.textContent.trim();
+      if (!(t.startsWith('{') || t.startsWith('[')) && s.type !== 'application/json' && s.type !== 'application/ld+json') continue;
+      try { visit(JSON.parse(t)); } catch {}
+    }
+    const flight = flightText(doc);
+    for (const line of flight.split('\n')) {
+      if (found.size === want.size) break;
+      const i = line.indexOf(':');
+      if (i < 0 || !/[[{]/.test(line[i + 1] || '')) continue;
+      try { visit(JSON.parse(line.slice(i + 1))); } catch {}
+    }
+    // Last resort: a coordinate pair whose nearest listing id in the text is this one.
+    const rest = ids.filter((id) => !found.has(id));
+    if (rest.length) {
+      const text = flight + [...doc.querySelectorAll('script')].map((s) => s.textContent).join('\n');
+      const mentions = [...text.matchAll(/(?<!\d)(\d{5,9})(?!\d)/g)].filter((m) => want.has(m[1])).map((m) => ({ id: m[1], at: m.index }));
+      if (mentions.length) {
+        for (const g of pairCandidates(text, '0')) {
+          const near = mentions.reduce((a, b) => (Math.abs(b.at - g.at) < Math.abs(a.at - g.at) ? b : a));
+          if (Math.abs(near.at - g.at) < 600 && rest.includes(near.id) && !found.has(near.id)) found.set(near.id, { lat: g.lat, lon: g.lon, sure: false });
+        }
+      }
+    }
+    return found;
+  }
+
+  const listPos = new Map(); // id → position, or null when it can't be found
+  const parsedPages = new Set();
+  const posQueue = [];
+  let posActive = 0;
+  let locating = false;
+  let onPositions = () => {};
+  function knownPos(id) {
+    if (listPos.has(id)) return listPos.get(id);
+    const p = cacheGet(`pos:${id}`);
+    if (p) listPos.set(id, p);
+    return p || undefined;
+  }
+  function pumpPositions() {
+    while (posActive < 3 && posQueue.length) {
+      const { id, url } = posQueue.shift();
+      posActive++;
+      listingPos(id, url).then((p) => { listPos.set(id, p || null); }).finally(() => { posActive--; onPositions(); pumpPositions(); });
+    }
+  }
+  // Positions for the cards: from this page's data first, then from the page fetched once, then listing by listing
+  // (at most 3 at a time). None of this costs any Trafiklab calls.
+  async function locateCards(cards) {
+    const missing = () => cards.filter((x) => knownPos(x.id) === undefined && !posQueue.some((q) => q.id === x.id) && !posJobs.has(x.id));
+    const keep = (found) => {
+      loadCache();
+      for (const [id, p] of found) { listPos.set(id, p); cacheMem[CACHE_NS + `pos:${id}`] = { t: Date.now(), v: p }; }
+      if (found.size) GM_setValue('cache', cacheMem);
+    };
+    if (locating || !missing().length) return;
+    locating = true;
+    try { await locateFrom(location.href, missing, keep); } finally { locating = false; }
+    for (const x of missing()) posQueue.push({ id: x.id, url: x.url });
+    pumpPositions();
+  }
+  async function locateFrom(page, missing, keep) {
+    if (!parsedPages.has(`doc:${page}`)) {
+      parsedPages.add(`doc:${page}`);
+      keep(positionsIn(document, missing().map((x) => x.id)));
+    }
+    if (missing().length > 3 && !parsedPages.has(`get:${page}`)) {
+      parsedPages.add(`get:${page}`);
+      try {
+        const html = await (await fetch(page, { credentials: 'include' })).text();
+        keep(positionsIn(new DOMParser().parseFromString(html, 'text/html'), missing().map((x) => x.id)));
+      } catch {}
+      onPositions();
+    }
+  }
+
   // =====================================================================
   // Evaluation + score
   // =====================================================================
@@ -967,6 +1194,9 @@
   // value: for the facts row, card: "value unit" text for the map card, extra: dot/icon html, title: longer explanation
   function kpiValue(spec, st, c) {
     const lower = spec.label.toLowerCase();
+    if (st.status === 'loading' && spec.key === 'commute' && st.est) { // the table's estimate, until the exact value is ready
+      return { value: `ca ${st.est.mins} min`, extra: '', card: `ca ${st.est.mins} min pendling` };
+    }
     if (st.status !== 'done') {
       const v = st.status === 'error' ? '–' : '…';
       return { value: v, extra: '', card: `${v} ${lower}` };
@@ -1256,7 +1486,7 @@
       l2 = 'Lägg till en gratis API-nyckel från Trafiklab och dina resmål för att se hur bostaden passar din pendling.';
       detail = `<div class="foot"><span></span><button class="btn primary" data-act="settings">Öppna inställningar</button></div>`;
     } else if (state.status === 'loading') {
-      l1 = 'Beräknar din pendling…';
+      l1 = state.est ? `Beräknar din pendling… (ca ${state.est.mins} min)` : 'Beräknar din pendling…';
     } else if (state.status === 'error') {
       badge = '!';
       value = '–';
@@ -1368,7 +1598,7 @@
   // The "117 m²  4 rum  1 286 m² tomt" line inside a card.
   function findCardFactsLine(card) {
     for (const el of card.querySelectorAll('*')) {
-      if (el.closest('[data-bcs-card]')) continue;
+      if (el.closest('[data-bcs-card], [data-bcs-est]')) continue;
       if (!/^\d+([,.]\d+)?\s*rum$/i.test(el.textContent.trim())) continue;
       let line = el.parentElement;
       while (line && line !== card) {
@@ -1381,7 +1611,7 @@
 
   // Copy the line's last item ("1 286 m² tomt") so ours matches it.
   function makeCardItem(line) {
-    const tpl = [...line.children].filter((ch) => !ch.hasAttribute('data-bcs-card')).pop();
+    const tpl = [...line.children].filter((ch) => !ch.hasAttribute('data-bcs-card') && !ch.hasAttribute('data-bcs-est') && !ch.hasAttribute('data-bcs-btn')).pop();
     const el = tpl.cloneNode(true);
     el.removeAttribute('id');
     el.querySelectorAll('[id]').forEach((n) => n.removeAttribute('id'));
@@ -1407,7 +1637,7 @@
 
   // A listing's card values are saved per listing and settings, so lists can show them later without any lookups.
   function settingsSig(c) {
-    const str = JSON.stringify({ ...c, apiKey: '' });
+    const str = JSON.stringify({ ...c, apiKey: '', list: undefined }); // list filters don't change any result
     let h = 5381;
     for (let i = 0; i < str.length; i++) h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
     return h.toString(36);
@@ -1420,15 +1650,17 @@
   const saveSummary = (id, st, c) => {
     const sum = summaryOf(st, c);
     if (sum) cachePut(`sum:${id}:${settingsSig(c)}`, sum);
+    if (st.sc) cachePut(`scr:${id}:${settingsSig(c)}`, st.sc.total);
   };
   const savedSummary = (id, c, sig = settingsSig(c)) => cacheGet(`sum:${id}:${sig}`);
+  const savedScore = (id, c, sig = settingsSig(c)) => cacheGet(`scr:${id}:${sig}`);
 
   const cardJobs = new Map(); // listing id -> promise of { r, sc }
   function cardCommute(id, url) {
     if (!cardJobs.has(id)) {
       cardJobs.set(id, (async () => {
         const c = cfg();
-        const p = await cached(`pos:${id}`, () => getListingCoords(id, null, url));
+        const p = await listingPos(id, url);
         if (!p) throw new Error('Ingen position');
         const r = await evaluate(p, c);
         const needEv = c.kpis.some((k) => ['grocery', 'school', 'car'].includes(k));
@@ -1459,37 +1691,51 @@
       return true;
     }
     for (const el of items) setCardItem(el, kpiValue(el._spec, { status: 'loading' }, c).card);
+    // Until the exact value is ready, show the table's estimate in its place.
+    let done = false;
+    listingPos(id, url).then((p) => {
+      const t = tableFor(c, true), e = estimate(p, c, t);
+      if (done || !e) return;
+      for (const el of items) if (el._spec.key === 'commute' && el.isConnected) setCardItem(el, `ca ${e.mins} min pendling`, '', estTitle(e, t, c));
+    });
     cardCommute(id, url).then((res) => {
+      done = true;
       for (const el of items) {
         if (!el.isConnected) continue;
         const v = kpiValue(el._spec, { status: 'done', ...res }, c);
         setCardItem(el, v.card, v.extra, v.title);
       }
     }).catch(() => {
+      done = true;
       for (const el of items) if (el.isConnected) setCardItem(el, kpiValue(el._spec, { status: 'error' }, c).card);
     });
     return true;
   }
 
-  // Map popups calculate straight away: you opened that one house on purpose.
+  // Map popups calculate straight away: you opened that one house on purpose. Without a key they show the estimate.
   function decorateCards() {
     const c = cfg();
-    if (!c.apiKey) return;
     const specs = kpiSpecs(c);
     for (const { card, id, url } of findPopupCards()) {
       card.setAttribute('data-bcs-popup', '');
+      card.querySelectorAll('[data-bcs-btn]').forEach((b) => b.remove());
+      const line = findCardFactsLine(card);
+      if (!c.apiKey) {
+        const t = tableFor(c);
+        if (!line || !t) continue;
+        if (knownPos(id) === undefined) listingPos(id, url).then(() => onPositions());
+        estimateItem(line, id, c, t, settingsSig(c));
+        continue;
+      }
+      card.querySelectorAll('[data-bcs-est]').forEach((e) => e.remove());
       const existing = [...card.querySelectorAll('[data-bcs-card]')];
       if (existing.length === specs.length && existing.every((e) => e.dataset.bcsCard === id)) continue;
       existing.forEach((e) => e.remove()); // the card switched to another house
-      card.querySelectorAll('[data-bcs-btn]').forEach((b) => b.remove());
-      const line = findCardFactsLine(card);
       if (line) fillCard(line, id, url, c);
     }
     decorateListCards(c);
   }
 
-  // Result lists: each card gets a small "Visa pendling" button, so nothing is fetched until you ask.
-  // Houses you've already looked at show their values straight away, from saved results.
   function findListCards() {
     const out = [];
     const seen = new Set();
@@ -1516,10 +1762,152 @@
   const BTN_CSS = 'display:inline-flex;align-items:center;gap:.3em;margin-left:.6em;padding:.15em .7em;border:1px solid #cfcecb;' +
     'border-radius:999px;background:#fff;color:#1b1b1b;font:inherit;font-size:.85em;line-height:1.6;cursor:pointer;vertical-align:middle;white-space:nowrap;';
 
+  // Result lists: every card shows the table's estimate, with the score dot if the exact score is already saved.
   function decorateListCards(c) {
+    const cards = findListCards().filter(({ card }) => !card.closest('[data-bcs-popup]') && !card.querySelector('[data-bcs-popup]'));
+    const t = cards.length ? tableFor(c) : null;
+    if (!t) {
+      resetList();
+      if (c.apiKey) decorateListButtons(cards, c);
+      return;
+    }
+    if (t !== 'loading') locateCards(cards);
     const sig = settingsSig(c);
-    for (const { card, line, id, url } of findListCards()) {
-      if (card.closest('[data-bcs-popup]') || card.querySelector('[data-bcs-popup]')) continue;
+    for (const x of cards) x.est = estimateItem(x.line, x.id, c, t, sig);
+    filterList(cards, c, t);
+  }
+
+  // One "ca 34 min till Göteborg C" item in a card's facts line. Only touches the page when something changed.
+  function estimateItem(line, id, c, t, sig) {
+    line.querySelectorAll('[data-bcs-card], [data-bcs-btn]').forEach((e) => e.remove());
+    let el = line.querySelector('[data-bcs-est]');
+    if (el && el.dataset.bcsEst !== id) { el.remove(); el = null; }
+    if (!el) {
+      el = makeCardItem(line);
+      if (!el) return null;
+      el.setAttribute('data-bcs-est', id);
+      line.appendChild(el);
+    }
+    const p = knownPos(id);
+    const ready = t !== 'loading' && p !== undefined;
+    const e = ready && p ? estimate(p, c, t) : null;
+    const sc = savedScore(id, c, sig);
+    const text = ready ? estText(e, c) : 'pendling …';
+    const extra = sc != null ? dotHtml(tone(sc)) : '';
+    const title = !ready ? '' : (p ? estTitle(e, t, c) : 'Bostadens position hittades inte.') + (sc != null ? ` Pendlingspoäng ${sc} av 100.` : '');
+    const key = `${text}|${extra}|${title}`;
+    if (el._key !== key) {
+      el._key = key;
+      setCardItem(el, text, extra);
+      el.title = title;
+    }
+    return e;
+  }
+
+  // ---------- filter bar ----------
+  const SELECT_CSS = 'font:inherit;font-size:14px;height:36px;padding:0 8px;margin-left:6px;border:1px solid #cfcecb;border-radius:8px;background:#fff;color:inherit;cursor:pointer;';
+  let filterBar = null;
+
+  function makeFilterBar() {
+    const bar = document.createElement('div');
+    bar.setAttribute('data-bcs-filter', '');
+    bar.setAttribute('role', 'group');
+    bar.setAttribute('aria-label', 'Filtrera på pendling');
+    bar.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:8px 20px;margin:0 0 16px;font-size:14px;line-height:1.4;color:#1b1b1b;';
+    bar.innerHTML = `
+      <label><span data-l="max"></span><select data-f="max" style="${SELECT_CSS}">
+        <option value="0">Alla</option>${LIST_MAXES.map((m) => `<option value="${m}">${m} min</option>`).join('')}</select></label>
+      <label>Över gränsen<select data-f="over" style="${SELECT_CSS}"><option value="hide">Dölj</option><option value="dim">Tona ner</option></select></label>
+      <button type="button" data-f="sort" style="${BTN_CSS}margin-left:0;font-size:14px;height:36px;padding:0 14px;"><span aria-hidden="true">↕</span>Sortera efter pendling</button>
+      <span data-f="info" style="color:#5c5c5a"></span>`;
+    const update = (fn) => {
+      const c = cfg();
+      c.list = fn({ ...c.list });
+      saveCfg(c);
+      decorateCards();
+    };
+    bar.addEventListener('change', (e) => {
+      const f = e.target.dataset.f;
+      if (f === 'max') update((l) => ({ ...l, max: +e.target.value }));
+      if (f === 'over') update((l) => ({ ...l, over: e.target.value }));
+    });
+    bar.addEventListener('click', (e) => {
+      if (!e.target.closest('[data-f="sort"]')) return;
+      e.preventDefault();
+      update((l) => ({ ...l, sort: !l.sort }));
+    });
+    return bar;
+  }
+
+  const listBox = (cards) => {
+    let box = cards[0].card.parentElement;
+    while (box && !cards.every((x) => box.contains(x.card))) box = box.parentElement;
+    return box;
+  };
+  const itemIn = (box, el) => { while (el && el.parentElement !== box) el = el.parentElement; return el; };
+  const setStyle = (el, prop, v) => { if (el.style[prop] !== v) el.style[prop] = v; };
+
+  // Hide or dim listings over the limit, and order the loaded cards by commute (Booli's own sort is left alone).
+  function filterList(cards, c, t) {
+    const box = listBox(cards);
+    if (!box || box === document.body || box === document.documentElement) return;
+    if (!filterBar) filterBar = makeFilterBar();
+    if (filterBar.nextElementSibling !== box) box.before(filterBar);
+    const max = +c.list.max || 0;
+    const label = `Max pendling till ${tableLabel(c)}`;
+    const q = (f) => filterBar.querySelector(`[data-f="${f}"]`);
+    if (filterBar.querySelector('[data-l="max"]').textContent !== label) filterBar.querySelector('[data-l="max"]').textContent = label;
+    if (q('max').value !== String(max)) q('max').value = String(max);
+    if (q('over').value !== c.list.over) q('over').value = c.list.over;
+    q('over').disabled = !max;
+    q('sort').setAttribute('aria-pressed', String(!!c.list.sort));
+    setStyle(q('sort'), 'background', c.list.sort ? '#1b1b1b' : '#fff');
+    setStyle(q('sort'), 'color', c.list.sort ? '#fff' : '#1b1b1b');
+
+    const rows = cards.map((x, i) => ({ ...x, item: itemIn(box, x.card), i })).filter((r) => r.item);
+    let over = 0;
+    for (const r of rows) {
+      const mode = max && r.est && r.est.mins > max ? c.list.over : '';
+      if (mode) over++;
+      if ((r.item.dataset.bcsF || '') === mode) continue;
+      setStyle(r.item, 'display', mode === 'hide' ? 'none' : '');
+      setStyle(r.item, 'opacity', mode === 'dim' ? '0.35' : '');
+      if (mode) r.item.dataset.bcsF = mode; else delete r.item.dataset.bcsF;
+    }
+    const info = !max ? '' : over === 0 ? `Alla ${rows.length} inom ${max} min` : c.list.over === 'hide'
+      ? `Visar ${rows.length - over} av ${rows.length}` : `${over} av ${rows.length} över ${max} min`;
+    if (q('info').textContent !== info) q('info').textContent = info;
+
+    if (c.list.sort) {
+      if (!box.dataset.bcsSort) {
+        const native = /flex|grid/.test(getComputedStyle(box).display);
+        box.dataset.bcsSort = native ? 'native' : 'set';
+        if (!native) { box.style.display = 'flex'; box.style.flexDirection = 'column'; }
+      }
+      const ranked = rows.slice().sort((a, b) => (a.est ? a.est.mins : 1e6) - (b.est ? b.est.mins : 1e6) || a.i - b.i);
+      ranked.forEach((r, k) => setStyle(r.item, 'order', String(k + 1)));
+      const mine = new Set(rows.map((r) => r.item));
+      for (const ch of box.children) if (!mine.has(ch)) setStyle(ch, 'order', String(rows.length + 1)); // ads and the like go last
+    } else if (box.dataset.bcsSort) unsort(box);
+  }
+
+  function unsort(box) {
+    if (box.dataset.bcsSort === 'set') { box.style.display = ''; box.style.flexDirection = ''; }
+    delete box.dataset.bcsSort;
+    for (const ch of box.children) ch.style.order = '';
+  }
+  function resetList() {
+    if (filterBar) filterBar.remove();
+    document.querySelectorAll('[data-bcs-f]').forEach((el) => { el.style.display = ''; el.style.opacity = ''; delete el.dataset.bcsF; });
+    document.querySelectorAll('[data-bcs-sort]').forEach(unsort);
+  }
+
+  // Without a table for your destination, each card gets a small "Visa pendling" button, so nothing is fetched
+  // until you ask. Houses you've already looked at show their values straight away, from saved results.
+  function decorateListButtons(cards, c) {
+    const sig = settingsSig(c);
+    for (const { line, id, url } of cards) {
+      line.querySelectorAll('[data-bcs-est]').forEach((e) => e.remove());
       const existing = [...line.querySelectorAll('[data-bcs-card]')];
       if (existing.length && existing.every((e) => e.dataset.bcsCard === id)) continue; // already filled
       existing.forEach((e) => e.remove());
@@ -1981,6 +2369,29 @@
       </section>`;
     }
 
+    function secLists() {
+      const meta = TABLES.find((t) => t.key === d.list.table);
+      const t = meta ? tableNow(meta.key) : null;
+      const inDests = meta && d.destinations.some((x) => x.lat && haversineKm(x, meta) < 0.5);
+      const when = !meta ? '' : t
+        ? `Tidtabell från ${fmtDay(t.data.serviceDate)}, framme ${t.data.arriveBy}.${t.stale ? ` Tidtabellen är ${t.ageDays} dagar gammal.` : ''}`
+        : 'Tidtabellen hämtas första gången du ser en lista.';
+      const opt = (v, label, cur) => `<option value="${v}" ${String(v) === String(cur) ? 'selected' : ''}>${esc(label)}</option>`;
+      return `<section><h3>Listor och kartan</h3>
+        <p class="hint">Varje bostad i sökresultaten får en ungefärlig restid, räknad från en tidtabell som uppdateras varje vecka. Det behövs ingen nyckel och inga anrop till Trafiklab. På bostadssidan räknas restiden exakt.</p>
+        <div class="grid2">
+          <div class="field"><label for="lt">Restid till</label>
+            <select id="lt" class="wide" data-k="lt" data-f="listTable">${TABLES.map((x) => opt(x.key, x.label, d.list.table)).join('')}${opt('off', 'Visa inte', d.list.table)}</select></div>
+          ${meta ? `<div class="field"><label for="lmax">Max pendling</label>
+            <select id="lmax" class="wide" data-k="lmax" data-f="listMax">${opt(0, 'Alla', d.list.max)}${LIST_MAXES.map((m) => opt(m, `${m} min`, d.list.max)).join('')}</select></div>` : ''}
+        </div>
+        ${meta ? `<div class="row"><span class="lbl" id="lo-l" style="margin:0">Över gränsen</span>${seg('listOver', [{ v: 'hide', label: 'Dölj' }, { v: 'dim', label: 'Tona ner' }], d.list.over, 'lo-l')}</div>
+          <label class="check solo"><input type="checkbox" data-act="listSort" data-k="listSort" ${d.list.sort ? 'checked' : ''}>Sortera efter pendling</label>
+          ${inDests ? '' : `<p class="note">Lägg till ${esc(meta.name)} som resmål för att se uppskattningarna.</p>`}
+          <p class="note">${esc(when)} Restidstabell: Trafiklab (Samtrafiken).</p>` : ''}
+      </section>`;
+    }
+
     function secAdvanced() {
       const chevron = '<svg class="chev" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M5 7.5l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
       let body = '';
@@ -2033,7 +2444,7 @@
       const k = active && active.dataset && active.dataset.k;
       const caret = active && typeof active.selectionStart === 'number' ? active.selectionStart : null;
       const top = content.scrollTop;
-      content.innerHTML = secWelcome() + secCommute() + secStation() + secLastHome() + secEveryday() + secWeights() + secShow() + secAdvanced();
+      content.innerHTML = secWelcome() + secCommute() + secStation() + secLastHome() + secEveryday() + secWeights() + secShow() + secLists() + secAdvanced();
       content.scrollTop = top;
       if (k) {
         const el = sr.querySelector(`[data-k="${k}"]`);
@@ -2102,6 +2513,9 @@
     sr.addEventListener('change', (e) => {
       const t = e.target;
       if (t.dataset.f === 'lastHome') { d.lastHome = t.value; paint(); }
+      else if (t.dataset.f === 'listTable') { d.list.table = t.value; paint(); }
+      else if (t.dataset.f === 'listMax') { d.list.max = +t.value; paint(); }
+      else if (t.dataset.act === 'listSort') { d.list.sort = t.checked; paint(); }
       else if (t.dataset.f in numberFields) paint(); // weights and the like update presets and bars
       else if (t.dataset.act === 'detail') { d.details[t.dataset.v] = t.checked; paint(); }
       else if (t.dataset.act === 'todayDelta') { d.showTodayDelta = t.checked; paint(); }
@@ -2116,7 +2530,7 @@
       if (!t || t.disabled) return;
       const act = t.dataset.act;
       const v = t.dataset.v;
-      if (act === 'detail' || act === 'todayDelta') return; // handled by change
+      if (act === 'detail' || act === 'todayDelta' || act === 'listSort') return; // handled by change
       if (act === 'close') return close();
       if (act === 'save') return save();
       if (act === 'reset') {
@@ -2128,6 +2542,7 @@
         else if (g === 'level') d.details = detailsFor(v);
         else if (g.startsWith('w-')) d.destinations[+g.slice(2)].weight = +v;
         else if (g.startsWith('evm-')) d.everyday[g.slice(4)].mode = v;
+        else if (g === 'listOver') d.list.over = v;
       } else if (act === 'step') {
         const delta = +t.dataset.d;
         const [kind, idx] = t.dataset.s.split('-');
@@ -2237,6 +2652,7 @@
       close();
       cardJobs.clear();
       document.querySelectorAll('[data-bcs-card]').forEach((n) => n.remove());
+      decorateCards();
       // Route lookups are cached per setting that affects them, so display-only changes just recalculate the score.
       run();
     }
@@ -2283,6 +2699,8 @@
       const p = await getListingCoords(id);
       if (token !== runToken) return;
       if (!p) throw new Error('Bostadens position finns inte i sidans data.');
+      state.p = p;
+      showPlaceholder();
       const r = await evaluate(p, c);
       if (token !== runToken) return;
       state = { status: 'done', r, sc: score(r, c) };
@@ -2296,17 +2714,29 @@
     render();
   }
 
+  // While the exact calculation runs, the commute value shows the table's estimate.
+  function showPlaceholder() {
+    if (state.status !== 'loading' || !state.p) return;
+    const c = cfg();
+    state.est = estimate(state.p, c, tableFor(c, true));
+    if (state.est) render();
+  }
+
   // Booli re-renders as you navigate: re-attach the panel when it gets dropped, re-run when the URL changes.
   let lastUrl = '';
   let mountTimer = null;
-  new MutationObserver(() => {
+  const soon = () => {
     if (mountTimer) return;
     mountTimer = setTimeout(() => { mountTimer = null; mount(); decorateCards(); }, 300);
-  }).observe(document.body, { childList: true, subtree: true });
+  };
+  new MutationObserver(soon).observe(document.body, { childList: true, subtree: true });
+  onPositions = soon;
+  onTableLoaded = () => { soon(); showPlaceholder(); };
   setInterval(() => { if (location.href !== lastUrl) { lastUrl = location.href; run(); } }, 800);
   decorateCards();
 
   GM_registerMenuCommand('Pendlingsinställningar', () => openSettings());
+  if (window.__BCS_TEST__) Object.assign(window.__BCS_TEST__, { estimate, indexTable, positionsIn, cfg, DEFAULTS });
   GM_registerMenuCommand('Kopiera positionsdata för felsökning', async () => {
     const id = listingId();
     if (!id) return alert('Öppna en bostad på Booli först.');

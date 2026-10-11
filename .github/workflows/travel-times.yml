@@ -1,0 +1,47 @@
+name: Travel-time table
+
+on:
+  schedule:
+    - cron: '0 5 * * 1' # Mondays 05:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: travel-times
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Test
+        working-directory: tools/build-table
+        run: npm test
+
+      - name: Build tables
+        working-directory: tools/build-table
+        env:
+          GTFS_KEY: ${{ secrets.GTFS_KEY }}
+          RESROBOT_KEY: ${{ secrets.RESROBOT_KEY }}
+        run: node build.js
+
+      - name: Commit if changed
+        run: |
+          git add data/
+          if git diff --cached --quiet; then
+            echo "Ingen ändring i tabellerna"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898299+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update travel-time tables"
+          git push

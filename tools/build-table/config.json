@@ -1,0 +1,13 @@
+{
+  "feed": "vt",
+  "includeSweden": false,
+  "arriveBy": "08:00",
+  "maxMinutes": 120,
+  "destinations": [
+    { "key": "gbg-c", "name": "Göteborg Centralstation", "stopNamePattern": "^Göteborg Centralstation" }
+  ],
+  "spotCheck": [
+    "Mölndal station", "Lindome station", "Kungsbacka station", "Partille station", "Lerum station",
+    "Alingsås station", "Kungälv Busstation", "Hisings Backa torg", "Frölunda torg", "Angered centrum"
+  ]
+}
