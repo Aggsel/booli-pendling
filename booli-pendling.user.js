@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.9.4
+// @version      1.10.0
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -771,43 +771,6 @@
       if (on && mins <= c.directMax) consider({ mins, access: { how, mins }, direct: true, via: null, chg: 0, modes: '', last: null });
     }
     return best;
-  }
-
-  // For the map shading: can anywhere in the rectangle [s, w, n, e] (a point when s = n and w = e) reach the
-  // destination within `max` minutes? The same sums as estimate(), measured from the rectangle's nearest point,
-  // but it stops at the first way that works, skips stops that can't help, and uses flat distances (fine over a
-  // few kilometres). Much faster than estimate() in the dense city centre.
-  function reachable(rect, c, t, max) {
-    const [s, w, n, e] = rect;
-    const kmLon = t.kmLon;
-    const distKm = (p) => {
-      const dy = (p.lat - Math.min(n, Math.max(s, p.lat))) * KM_LAT, dx = (p.lon - Math.min(e, Math.max(w, p.lon))) * kmLon;
-      return Math.sqrt(dx * dx + dy * dy);
-    };
-    const direct = distKm(t.dest) * 1.3;
-    for (const [on, kmh] of [[c.accessModes.walk, c.walkSpeed], [c.accessModes.bike, c.bikeSpeed]]) {
-      if (on && minsAt(direct, kmh) <= Math.min(c.directMax, max)) return true;
-    }
-    const reachKm = (kmh, spare) => Math.min(ACCESS_RADIUS_KM, ((Math.min(c.accessMax, spare) + 0.5) / 60) * kmh / 1.3);
-    const reach = Math.max(reachKm(c.walkSpeed, max), c.accessModes.bike ? reachKm(c.bikeSpeed, max - c.stationBuffer) : 0);
-    if (reach <= 0) return false;
-    const r = Math.ceil(reach);
-    for (let cy = Math.floor(s * KM_LAT) - r; cy <= Math.floor(n * KM_LAT) + r; cy++) {
-      for (let cx = Math.floor(w * kmLon) - r; cx <= Math.floor(e * kmLon) + r; cx++) {
-        for (const st of t.grid.get(`${cy},${cx}`) || []) {
-          if (st.min > max) continue;
-          const km = distKm(st);
-          if (km > reach) continue;
-          const walk = minsAt(km * 1.3, c.walkSpeed);
-          if (walk <= c.accessMax && walk + st.min <= max) return true;
-          if (c.accessModes.bike) {
-            const bike = minsAt(km * 1.3, c.bikeSpeed);
-            if (bike <= c.accessMax && bike + c.stationBuffer + st.min <= max) return true;
-          }
-        }
-      }
-    }
-    return false;
   }
 
   const MONTHS = ['jan', 'feb', 'mars', 'apr', 'maj', 'juni', 'juli', 'aug', 'sep', 'okt', 'nov', 'dec'];
@@ -2230,151 +2193,313 @@
   }
 
   // ---------- shading the areas over the limit ----------
-  // Grouped dots can't be dimmed one by one, so the map itself is shaded: a grid over the visible area, cells over
-  // the limit (or with no stop within reach) drawn light grey under the dots, and a dark line along the edge of the
-  // area within the limit. Cells have fixed sizes (125 m, 250 m, 500 m …) on fixed lines, so they stay put as you
-  // pan and zoom. Along the edge the grid is finer: a cell that is only partly within the limit is split 2 × 2, and
-  // only the parts that still straddle the limit are split again, so the work follows the edge's length, not its
-  // area, and small pockets near a station show even when zoomed out.
+  // Grouped dots can't be dimmed one by one, so the map itself is shaded. The script works out commute minutes on a
+  // grid of points on fixed lines and draws the limit as a contour: where between two points the minutes cross the
+  // limit, as on an elevation map. The edge is smooth, and changing the limit needs no new minutes at all.
+  // The minutes come from a distance transform: each stop is placed at the grid points around it, and two sweeps
+  // over the grid let every point take over a neighbour's best stop when that is faster from here. Each point looks
+  // at a few neighbours instead of every stop within reach, which in the city is hundreds.
   const SHADE_ID = 'bcs-commute-shade';
-  const SHADE_PX = 32; // base cell size on screen
-  const SHADE_SPLIT = 8; // edge cells are refined down to 1/8 of a base cell (about 4 px) …
-  const SHADE_MIN_M = 62.5; // … but never below this
+  const FIELD_PX = 6; // grid spacing on screen; the contour interpolates between points, so the edge stays smooth
+  const FIELD_MIN_M = 62.5; // never finer than this (the contour stays smooth; finer only adds work)
+  const FIELD_CAP = 999; // "no way within reach"
   const SHADE_REF_LAT = 57.7; // fixed east-west spacing for the grid
+  const KM_LON_REF = KM_LAT * Math.cos((SHADE_REF_LAT * Math.PI) / 180);
   let shadeSig = '';
-  const shadeMemo = new Map(); // cell or point → over the limit? Reused across panning and zooming.
-  let shadeMemoKey = '';
+  let shadeField = null; // the last view's minutes, reused when only the limit changes
 
-  // judge.overAt(point, key): is this point over the limit? judge.allOver(rect, key): is every point in it over?
-  // A generator that pauses after each row of base cells, so the work can be spread out; returns the GeoJSON.
-  function* shadeSteps(bounds, zoom, judge) {
-    const [[w0, s0], [e0, n0]] = bounds;
+  // Grid spacing in metres for a zoom level: fixed sizes (31.25 m, 62.5 m, 125 m …), at least FIELD_PX on screen.
+  function fieldSpacing(zoom) {
     const mPerPx = (156543.03 * Math.cos((SHADE_REF_LAT * Math.PI) / 180)) / 2 ** zoom;
-    let cell = SHADE_MIN_M;
-    while (cell / mPerPx < SHADE_PX && cell < 16000) cell *= 2;
-    const kmLon = KM_LAT * Math.cos((SHADE_REF_LAT * Math.PI) / 180);
-    // A margin around the view, so panning a little doesn't show an unshaded edge.
-    const padLat = (n0 - s0) * 0.15, padLon = (e0 - w0) * 0.15;
-    const [w, s, e, n] = [w0 - padLon, s0 - padLat, e0 + padLon, n0 + padLat];
-    const cellsFor = (m) => ((n - s) * KM_LAT * 1000 / m) * ((e - w) * kmLon * 1000 / m);
-    while (cellsFor(cell) > 6000 && cell < 16000) cell *= 2;
-    const split = Math.max(1, Math.min(SHADE_SPLIT, cell / SHADE_MIN_M));
-    const fine = cell / split;
-    const dLat = cell / (KM_LAT * 1000), dLon = cell / (kmLon * 1000);
-    const fLat = dLat / split, fLon = dLon / split;
-    const I0 = Math.floor(s / dLat), I1 = Math.ceil(n / dLat), J0 = Math.floor(w / dLon), J1 = Math.ceil(e / dLon);
-    // The fine grid: rows i from i0, columns j from j0. Whole base cells fill all their fine cells at once.
-    const i0 = I0 * split, i1 = I1 * split, j0 = J0 * split, j1 = J1 * split;
-    const over = Array.from({ length: i1 - i0 }, () => new Array(j1 - j0));
-    const fill = (I, J, v) => { for (let a = 0; a < split; a++) for (let b = 0; b < split; b++) over[I * split + a - i0][J * split + b - j0] = v; };
-    const pointKey = (size, i, j) => `p${size}:${i}:${j}`;
-    // A cell of `size` fine cells at fine row i, column j: all over, all within, or split 2 × 2 and decided per part.
-    const decide = (i, j, size) => {
-      const fillCells = (v) => { for (let a = 0; a < size; a++) for (let b = 0; b < size; b++) over[i + a - i0][j + b - j0] = v; };
-      const m = fine * size;
-      const rect = [i * fLat, j * fLon, (i + size) * fLat, (j + size) * fLon];
-      if (judge.allOver(rect, `r${m}:${i / size}:${j / size}`)) return fillCells(true);
-      // Some point is within. Centre and corners on a grid of half cells, shared with the neighbours.
-      const at2 = (y, x) => judge.overAt({ lat: (y / 2) * fLat, lon: (x / 2) * fLon }, pointKey(fine, y, x));
-      const y0 = i * 2, x0 = j * 2, d = size * 2;
-      const centre = at2(y0 + size, x0 + size);
-      if (size === 1) return fillCells(centre);
-      const corners = [[y0, x0], [y0 + d, x0], [y0, x0 + d], [y0 + d, x0 + d]].map(([y, x]) => at2(y, x));
-      if (!centre && corners.every((o) => !o)) return fillCells(false);
-      const h = size / 2;
-      decide(i, j, h); decide(i + h, j, h); decide(i, j + h, h); decide(i + h, j + h, h);
-    };
-    for (let I = I0; I < I1; I++) {
-      for (let J = J0; J < J1; J++) decide(I * split, J * split, split);
-      yield;
+    let m = FIELD_MIN_M;
+    while (m / mPerPx < FIELD_PX && m < 16000) m *= 2;
+    return m;
+  }
+
+  // Commute minutes to one destination at the grid points of a view: point (i, j) sits at latitude i·dLat,
+  // longitude j·dLon. Returns a Float32Array, row by row, over the view. Walking and cycling to a stop are swept
+  // separately (each has one speed and one reach, which keeps the sweeps exact), and each point takes the faster.
+  function fieldFor(view, m, c, t) {
+    const dLat = m / (KM_LAT * 1000), dLon = m / (KM_LON_REF * 1000);
+    const kmLon = t.kmLon;
+    // Limits compare rounded minutes, as estimate() does: 45.4 min counts as 45.
+    const directMax = c.directMax + 0.5, accessMax = c.accessMax + 0.5;
+    const reachOf = (kmh) => Math.min(ACCESS_RADIUS_KM, ((accessMax / 60) * kmh) / 1.3);
+    const ways = [{ kmh: c.walkSpeed, extra: 0 }];
+    if (c.accessModes.bike) ways.push({ kmh: c.bikeSpeed, extra: c.stationBuffer });
+    // Work on the view plus a margin as wide as the longest reach, so stops just outside the view count.
+    const pad = Math.ceil((Math.max(...ways.map((x) => reachOf(x.kmh))) * 1000) / m) + 1;
+    const I0 = view.i0 - pad, J0 = view.j0 - pad;
+    const H = view.i1 - view.i0 + 1 + 2 * pad, W = view.j1 - view.j0 + 1 + 2 * pad;
+    const stops = [];
+    const s0 = I0 * dLat, n0 = (I0 + H) * dLat, w0 = J0 * dLon, e0 = (J0 + W) * dLon;
+    for (let cy = Math.floor(s0 * KM_LAT); cy <= Math.floor(n0 * KM_LAT); cy++) {
+      for (let cx = Math.floor(w0 * kmLon); cx <= Math.floor(e0 * kmLon); cx++) stops.push(...(t.grid.get(`${cy},${cx}`) || []));
     }
-    const at = (i, j) => over[i - i0][j - j0];
+    const best = new Float32Array(W * H).fill(FIELD_CAP);
+    // Minutes from grid point (i, j) through stop s one way: get there, then the stop's own minutes.
+    const viaWay = (way, s, i, j) => {
+      const dy = (i * dLat - s.lat) * KM_LAT, dx = (j * dLon - s.lon) * kmLon;
+      const km = Math.sqrt(dx * dx + dy * dy);
+      return km > way.reach ? FIELD_CAP : km * way.perKm + way.extra + s.min;
+    };
+    for (const way of ways) { way.reach = reachOf(way.kmh); way.perKm = (1.3 / way.kmh) * 60; }
+    for (const way of ways) {
+      const via = (s, i, j) => viaWay(way, s, i, j);
+      // Each point keeps its two best stops, so a slower stop can travel through an area where a faster one wins,
+      // to where the faster one is out of reach.
+      const val = new Float32Array(W * H).fill(FIELD_CAP), val2 = new Float32Array(W * H).fill(FIELD_CAP);
+      const seed = new Int32Array(W * H).fill(-1), seed2 = new Int32Array(W * H).fill(-1);
+      const offer = (k, id, v) => {
+        if (id === seed[k] || id === seed2[k] || v >= val2[k]) return;
+        if (v < val[k]) { val2[k] = val[k]; seed2[k] = seed[k]; val[k] = v; seed[k] = id; }
+        else { val2[k] = v; seed2[k] = id; }
+      };
+      // Place every stop at the grid points around it.
+      stops.forEach((st, id) => {
+        const si = Math.round(st.lat / dLat), sj = Math.round(st.lon / dLon);
+        for (let a = si - 1; a <= si + 1; a++) for (let b = sj - 1; b <= sj + 1; b++) {
+          if (a >= I0 && a < I0 + H && b >= J0 && b < J0 + W) offer((a - I0) * W + (b - J0), id, via(st, a, b));
+        }
+      });
+      // Two sweeps: each point tries its neighbours' two best stops.
+      const tryFrom = (k, i, j, k2) => {
+        const s1 = seed[k2], s2 = seed2[k2];
+        if (s1 >= 0 && s1 !== seed[k] && s1 !== seed2[k]) offer(k, s1, via(stops[s1], i, j));
+        if (s2 >= 0 && s2 !== seed[k] && s2 !== seed2[k]) offer(k, s2, via(stops[s2], i, j));
+      };
+      for (let a = 0; a < H; a++) {
+        const i = I0 + a;
+        for (let b = 0; b < W; b++) {
+          const k = a * W + b, j = J0 + b;
+          if (a > 0) { tryFrom(k, i, j, k - W); if (b > 0) tryFrom(k, i, j, k - W - 1); if (b < W - 1) tryFrom(k, i, j, k - W + 1); }
+          if (b > 0) tryFrom(k, i, j, k - 1);
+        }
+        for (let b = W - 2; b >= 0; b--) tryFrom(a * W + b, i, J0 + b, a * W + b + 1);
+      }
+      for (let a = H - 1; a >= 0; a--) {
+        const i = I0 + a;
+        for (let b = W - 1; b >= 0; b--) {
+          const k = a * W + b, j = J0 + b;
+          if (a < H - 1) { tryFrom(k, i, j, k + W); if (b > 0) tryFrom(k, i, j, k + W - 1); if (b < W - 1) tryFrom(k, i, j, k + W + 1); }
+          if (b < W - 1) tryFrom(k, i, j, k + 1);
+        }
+        for (let b = 1; b < W; b++) tryFrom(a * W + b, i, J0 + b, a * W + b - 1);
+      }
+      for (let k = 0; k < best.length; k++) if (val[k] < best[k]) best[k] = val[k];
+    }
+    // Walking or cycling the whole way, and the view without its margin.
+    const vw = view.j1 - view.j0 + 1, vh = view.i1 - view.i0 + 1;
+    const out = new Float32Array(vw * vh);
+    for (let a = 0; a < vh; a++) {
+      const i = view.i0 + a, dy = (i * dLat - t.dest.lat) * KM_LAT;
+      for (let b = 0; b < vw; b++) {
+        const j = view.j0 + b;
+        let v = best[(a + pad) * W + (b + pad)];
+        // Rarely a sweep loses the only stop within reach. Where it found none but a neighbour has a way, check the
+        // stops nearby directly. (Large areas without any way, like the sea, are left alone.)
+        const g = (a + pad) * W + (b + pad);
+        if (v >= FIELD_CAP && (best[g - 1] < FIELD_CAP || best[g + 1] < FIELD_CAP || best[g - W] < FIELD_CAP || best[g + W] < FIELD_CAP)) {
+          const lat = i * dLat, lon = j * dLon;
+          for (let cy = Math.floor((lat - ACCESS_RADIUS_KM / KM_LAT) * KM_LAT); cy <= Math.floor((lat + ACCESS_RADIUS_KM / KM_LAT) * KM_LAT); cy++) {
+            for (let cx = Math.floor((lon - ACCESS_RADIUS_KM / kmLon) * kmLon); cx <= Math.floor((lon + ACCESS_RADIUS_KM / kmLon) * kmLon); cx++) {
+              for (const st of t.grid.get(`${cy},${cx}`) || []) for (const way of ways) v = Math.min(v, viaWay(way, st, i, j));
+            }
+          }
+        }
+        const dx = (j * dLon - t.dest.lon) * kmLon, road = Math.sqrt(dx * dx + dy * dy) * 1.3;
+        if (c.accessModes.walk) { const x = (road / c.walkSpeed) * 60; if (x < directMax && x < v) v = x; }
+        if (c.accessModes.bike) { const x = (road / c.bikeSpeed) * 60; if (x < directMax && x < v) v = x; }
+        out[a * vw + b] = v;
+      }
+    }
+    return out;
+  }
+
+  // The contour: the area over the limit as polygons (whole cells merged per row, cut cells shaped by the
+  // crossing points) and the edge as lines. value(i, j) gives the minutes at grid point (i, j).
+  function contour(view, m, value, max) {
+    const { i0, i1, j0, j1 } = view;
+    const dLat = m / (KM_LAT * 1000), dLon = m / (KM_LON_REF * 1000);
+    const P = (i, j) => [j * dLon, i * dLat];
+    // Where the limit crosses the edge between two neighbouring points, always measured from the lower one,
+    // so both cells sharing the edge get exactly the same point.
+    const cross = (ia, ja, ib, jb) => {
+      if (ib < ia || jb < ja) [ia, ja, ib, jb] = [ib, jb, ia, ja];
+      const va = value(ia, ja), vb = value(ib, jb);
+      const f = Math.min(1, Math.max(0, (max - va) / (vb - va)));
+      return [(ja + (jb - ja) * f) * dLon, (ia + (ib - ia) * f) * dLat];
+    };
     const features = [];
-    const line = (a, b) => features.push({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [a, b] } });
-    for (let i = i0; i < i1; i++) { // grey: runs of cells over the limit in each fine row
+    const segs = [];
+    const poly = (ring) => features.push({ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [[...ring, ring[0]]] } });
+    for (let i = i0; i < i1; i++) {
       let run = null;
       for (let j = j0; j <= j1; j++) {
-        const o = j < j1 && at(i, j);
-        if (o && run == null) run = j;
-        if (!o && run != null) {
-          const [x0, x1, y0, y1] = [run * fLon, j * fLon, i * fLat, (i + 1) * fLat];
-          features.push({ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [[[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]] } });
-          run = null;
+        // Cell corners, going round: south-west, south-east, north-east, north-west.
+        const corners = j < j1 ? [[i, j], [i, j + 1], [i + 1, j + 1], [i + 1, j]] : null;
+        const over = corners ? corners.map(([a, b]) => value(a, b) > max) : null;
+        const full = over && over.every(Boolean);
+        if (full) { if (run == null) run = j; continue; }
+        if (run != null) { poly([P(i, run), P(i, j), P(i + 1, j), P(i + 1, run)]); run = null; }
+        if (!over || !over.some(Boolean)) continue;
+        // A cut cell: walk round it, keeping corners over the limit and the crossing points between.
+        const ring = [];
+        for (let k = 0; k < 4; k++) {
+          const [a, b] = corners[k], [a2, b2] = corners[(k + 1) % 4];
+          if (over[k]) ring.push({ p: P(a, b) });
+          if (over[k] !== over[(k + 1) % 4]) ring.push({ p: cross(a, b, a2, b2), x: true });
+        }
+        poly(ring.map((r) => r.p));
+        // The edge: the stretches of the ring that cut across the cell, from one crossing point to the next.
+        for (let k = 0; k < ring.length; k++) {
+          const r1 = ring[k], r2 = ring[(k + 1) % ring.length];
+          if (r1.x && r2.x) segs.push([r1.p, r2.p]);
         }
       }
     }
-    // The edge between cells over and within the limit, merged into long straight pieces.
-    for (let i = i0 + 1; i < i1; i++) { // horizontal edges, below fine row i
-      let run = null;
-      for (let j = j0; j <= j1; j++) {
-        const edge = j < j1 && at(i - 1, j) !== at(i, j);
-        if (edge && run == null) run = j;
-        if (!edge && run != null) { line([run * fLon, i * fLat], [j * fLon, i * fLat]); run = null; }
+    // Join the edge pieces into long lines.
+    const key = (p) => `${p[0].toFixed(7)},${p[1].toFixed(7)}`;
+    const ends = new Map();
+    for (const sg of segs) for (const p of sg) { const k = key(p); (ends.get(k) || ends.set(k, []).get(k)).push(sg); }
+    const used = new Set();
+    for (const sg of segs) {
+      if (used.has(sg)) continue;
+      used.add(sg);
+      const line = [...sg];
+      for (const atEnd of [true, false]) {
+        for (;;) {
+          const tip = atEnd ? line[line.length - 1] : line[0];
+          const next = (ends.get(key(tip)) || []).find((x) => !used.has(x));
+          if (!next) break;
+          used.add(next);
+          const far = key(next[0]) === key(tip) ? next[1] : next[0];
+          if (atEnd) line.push(far); else line.unshift(far);
+        }
       }
-    }
-    for (let j = j0 + 1; j < j1; j++) { // vertical edges, left of fine column j
-      let run = null;
-      for (let i = i0; i <= i1; i++) {
-        const edge = i < i1 && at(i, j - 1) !== at(i, j);
-        if (edge && run == null) run = i;
-        if (!edge && run != null) { line([j * fLon, run * fLat], [j * fLon, i * fLat]); run = null; }
-      }
+      features.push({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: line } });
     }
     return { type: 'FeatureCollection', features };
   }
-  function shadeCells(bounds, zoom, judge) { // all at once
-    const steps = shadeSteps(bounds, zoom, judge);
-    let r;
-    do r = steps.next(); while (!r.done);
-    return r.value;
-  }
-  // Runs the steps in slices of at most 12 ms, so the map stays responsive. A newer view drops an unfinished pass.
-  let shadeJob = 0;
-  let shadeRunning = false;
-  function runShade(steps, done) {
-    const job = ++shadeJob;
-    shadeRunning = true;
-    const slice = () => {
-      if (job !== shadeJob) return;
-      const t0 = performance.now();
-      let r;
-      do r = steps.next(); while (!r.done && performance.now() - t0 < 12);
-      if (!r.done) return void setTimeout(slice, 0);
-      shadeRunning = false;
-      done(r.value);
-    };
-    slice();
+
+  // The view's grid, with a margin so panning a little doesn't show an unshaded edge.
+  function fieldView(bounds, m) {
+    const [[w0, s0], [e0, n0]] = bounds;
+    const padLat = (n0 - s0) * 0.15, padLon = (e0 - w0) * 0.15;
+    const dLat = m / (KM_LAT * 1000), dLon = m / (KM_LON_REF * 1000);
+    return { i0: Math.floor((s0 - padLat) / dLat), i1: Math.ceil((n0 + padLat) / dLat), j0: Math.floor((w0 - padLon) / dLon), j1: Math.ceil((e0 + padLon) / dLon) };
   }
 
+  // Minutes per grid point over the view: the longest commute over the destinations, as in the list.
+  function fieldNow(view, m, c, ts) {
+    const vw = view.j1 - view.j0 + 1;
+    const fields = ts.map((x) => fieldFor(view, m, c, x.t));
+    const grid = fields[0];
+    for (let d = 1; d < fields.length; d++) for (let k = 0; k < grid.length; k++) if (fields[d][k] > grid[k]) grid[k] = fields[d][k];
+    return (i, j) => grid[(i - view.i0) * vw + (j - view.j0)];
+  }
+
+  // ---------- the minutes in a background thread ----------
+  // fieldFor() needs only these constants and the table's stops, so the same code runs in a Web Worker and the map
+  // never waits for the minutes. If the browser won't start one, the minutes are worked out here instead.
+  function fieldWorkerSource() {
+    return `'use strict';
+const KM_LAT = ${KM_LAT}, KM_LON_REF = ${KM_LON_REF}, ACCESS_RADIUS_KM = ${ACCESS_RADIUS_KM}, FIELD_CAP = ${FIELD_CAP};
+${fieldFor.toString()}
+const tables = new Map();
+self.onmessage = (e) => {
+  const d = e.data;
+  if (d.type === 'table') {
+    const grid = new Map();
+    for (const s of d.stops) {
+      const k = Math.floor(s.lat * KM_LAT) + ',' + Math.floor(s.lon * d.kmLon);
+      (grid.get(k) || grid.set(k, []).get(k)).push(s);
+    }
+    tables.set(d.key, { grid, dest: d.dest, kmLon: d.kmLon });
+    return;
+  }
+  const fields = d.keys.map((k) => fieldFor(d.view, d.m, d.c, tables.get(k)));
+  const g = fields[0];
+  for (let x = 1; x < fields.length; x++) for (let k = 0; k < g.length; k++) if (fields[x][k] > g[k]) g[k] = fields[x][k];
+  self.postMessage({ id: d.id, grid: g }, [g.buffer]);
+};`;
+  }
+  let fieldWorker = null, workerBroken = false, workerReq = 0;
+  const workerTables = new Set(), workerWaiting = new Map();
+  // Blocked, broken or silent: work the minutes out here from now on.
+  function dropWorker() {
+    workerBroken = true;
+    fieldWorker = null;
+    for (const done of workerWaiting.values()) done(null);
+    workerWaiting.clear();
+  }
+  // Started with the page's own Worker, Blob and URL: Firefox refuses a worker started from the userscript's sandbox.
+  function getWorker() {
+    const P = raw(pageWin);
+    if (fieldWorker || workerBroken || typeof P.Worker !== 'function') return fieldWorker;
+    try {
+      const blob = new P.Blob(toPage([fieldWorkerSource()]), toPage({ type: 'text/javascript' }));
+      fieldWorker = new P.Worker(P.URL.createObjectURL(blob));
+      fieldWorker.onmessage = pageFn((e) => {
+        const done = workerWaiting.get(e.data.id);
+        workerWaiting.delete(e.data.id);
+        if (done) done(e.data.grid);
+      });
+      fieldWorker.onerror = pageFn(dropWorker);
+    } catch { dropWorker(); }
+    return fieldWorker;
+  }
+  // The minutes for a view, then done(lookup): from the worker, or here.
+  function fieldAsync(view, m, c, ts, done) {
+    const w = getWorker();
+    if (!w) return done(fieldNow(view, m, c, ts));
+    const keys = ts.map((x) => `${x.meta.key}:${x.t.data.generated}`);
+    ts.forEach((x, n) => {
+      if (workerTables.has(keys[n])) return;
+      workerTables.add(keys[n]);
+      w.postMessage(toPage({ type: 'table', key: keys[n], stops: x.t.stops.map((st) => ({ lat: st.lat, lon: st.lon, min: st.min })),
+        dest: { lat: x.t.dest.lat, lon: x.t.dest.lon }, kmLon: x.t.kmLon }));
+    });
+    const id = ++workerReq;
+    const silent = setTimeout(() => { if (workerWaiting.has(id)) dropWorker(); }, 3000);
+    workerWaiting.set(id, (grid) => {
+      clearTimeout(silent);
+      if (!grid) return done(fieldNow(view, m, c, ts));
+      const vw = view.j1 - view.j0 + 1;
+      done((i, j) => grid[(i - view.i0) * vw + (j - view.j0)]);
+    });
+    w.postMessage(toPage({ type: 'field', id, keys, view: { ...view }, m, c: { walkSpeed: c.walkSpeed, bikeSpeed: c.bikeSpeed,
+      accessMax: c.accessMax, directMax: c.directMax, stationBuffer: c.stationBuffer, accessModes: { ...c.accessModes } } }));
+  }
+
+  let shadeWant = null; // the latest view and limit asked for, drawn when its minutes arrive
   function shadeMap(map, c, ts, max) {
     const on = ts.length && max;
     if (!on) {
-      shadeJob++; // drop any pass still running
-      shadeRunning = false;
       for (const id of [`${SHADE_ID}-edge`, SHADE_ID]) if (map.getLayer(id)) map.removeLayer(id);
       if (map.getSource(SHADE_ID)) map.removeSource(SHADE_ID);
       shadeSig = '';
       return;
     }
     const b = plain(map.getBounds().toArray());
-    const zoom = map.getZoom();
-    const r = (v) => v.toFixed(3);
-    const memoKey = `${settingsSig(c)}|${max}|${ts.map((x) => `${x.meta.key}:${x.t.data.generated}`).join(',')}`;
-    const sig = `${b.flat().map(r).join(',')}|${Math.round(zoom * 2)}|${c.list.over}|${memoKey}`;
-    if (sig === shadeSig && (shadeRunning || map.getLayer(SHADE_ID))) return; // drawn, or being worked out
+    const m = fieldSpacing(map.getZoom());
+    const view = fieldView(b, m);
+    const fieldKey = `${settingsSig(c)}|${ts.map((x) => `${x.meta.key}:${x.t.data.generated}`).join(',')}|${m}|${view.i0},${view.i1},${view.j0},${view.j1}`;
+    const sig = `${fieldKey}|${max}|${c.list.over}`;
+    if (sig === shadeSig && map.getLayer(SHADE_ID)) return;
     shadeSig = sig;
-    if (memoKey !== shadeMemoKey || shadeMemo.size > 200000) { shadeMemoKey = memoKey; shadeMemo.clear(); }
-    const memo = (key, fn) => {
-      let v = shadeMemo.get(key);
-      if (v === undefined) shadeMemo.set(key, (v = fn()));
-      return v;
+    const pending = shadeWant && shadeWant.fieldKey === fieldKey && !shadeWant.done;
+    shadeWant = { fieldKey, view, m, c, max, done: false };
+    const draw = () => {
+      const want = shadeWant;
+      if (!want || want.fieldKey !== shadeField.key) return; // a newer view is on its way
+      want.done = true;
+      try { drawShade(map, want.c, contour(want.view, want.m, shadeField.value, want.max)); } catch { shadeSig = ''; }
     };
-    const steps = shadeSteps(b, zoom, {
-      // Over the limit for any destination counts as over (the list uses the longest commute).
-      overAt: (p, key) => memo(key, () => ts.some((x) => !reachable([p.lat, p.lon, p.lat, p.lon], c, x.t, max))),
-      allOver: (rect, key) => memo(key, () => ts.some((x) => !reachable(rect, c, x.t, max))),
-    });
-    runShade(steps, (data) => { try { drawShade(map, c, data); } catch { shadeSig = ''; } });
+    // Only the limit changed: the minutes are already there.
+    if (shadeField && shadeField.key === fieldKey) return draw();
+    if (pending) return; // asked for already; the newest limit is drawn when the minutes arrive
+    fieldAsync(view, m, c, ts, (value) => { shadeField = { key: fieldKey, value }; draw(); });
   }
 
   function drawShade(map, c, data) {
@@ -3308,7 +3433,7 @@
     GM_setClipboard(JSON.stringify(debug, null, 2));
     alert('Kartdata kopierad. Klistra in den i chatten.');
   });
-  if (window.__BCS_TEST__) Object.assign(window.__BCS_TEST__, { estimate, reachable, shadeCells, indexTable, positionsIn, cfg, DEFAULTS });
+  if (window.__BCS_TEST__) Object.assign(window.__BCS_TEST__, { estimate, fieldNow, fieldView, fieldSpacing, contour, fieldWorkerSource, indexTable, positionsIn, cfg, DEFAULTS });
   GM_registerMenuCommand('Kopiera positionsdata för felsökning', async () => {
     const id = listingId();
     if (!id) return alert('Öppna en bostad på Booli först.');

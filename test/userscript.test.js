@@ -3,9 +3,20 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
+import vm from 'node:vm';
 
 const SRC = readFileSync(new URL('../booli-pendling.user.js', import.meta.url), 'utf8');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Is the point inside any of the shading's polygons? (Ray casting; the polygons have no holes.)
+const shaded = (features, p) => features.filter((f) => f.geometry.type === 'Polygon').some((f) => {
+  const ring = f.geometry.coordinates[0];
+  let inside = false;
+  for (let a = 0, b = ring.length - 1; a < ring.length; b = a++) {
+    const [xa, ya] = ring[a], [xb, yb] = ring[b];
+    if ((ya > p.lat) !== (yb > p.lat) && p.lon < ((xb - xa) * (p.lat - ya)) / (yb - ya) + xa) inside = !inside;
+  }
+  return inside;
+});
 const opened = [];
 afterEach(() => { while (opened.length) opened.pop().close(); }); // jsdom timers would keep the runner alive
 
@@ -80,19 +91,80 @@ test('estimate(): walking, cycling, Som längst, direct bike, no stop nearby', (
   close();
 });
 
-test('the map\'s quick check agrees with estimate() (apart from a minute of rounding at the limit)', () => {
+test('the map\'s commute minutes agree with estimate() at the grid points', () => {
   const { api } = load();
   const t = api.indexTable(TABLE);
+  const ts = [{ meta: { key: 'gbg-c' }, t }];
   for (const c of [api.cfg(), { ...api.cfg(), accessModes: { walk: true, bike: false, bus: true } }]) {
-    for (const max of [15, 25, 35, 50]) {
-      for (let i = 0; i < 400; i++) {
-        const p = { lat: 57.5 + (i % 20) * 0.012, lon: 11.85 + Math.floor(i / 20) * 0.017 };
-        const e = api.estimate(p, c, t);
-        if (e && Math.abs(e.mins - max) <= 1) continue; // right at the limit: rounding may differ
-        assert.equal(api.reachable([p.lat, p.lon, p.lat, p.lon], c, t, max), !!e && e.mins <= max, `${p.lat},${p.lon} max ${max}`);
-      }
+    const m = 250, view = api.fieldView([[11.85, 57.5], [12.2, 57.75]], m);
+    const value = api.fieldNow(view, m, c, ts);
+    let n = 0, off = 0;
+    for (let i = view.i0; i < view.i1; i += 3) for (let j = view.j0; j < view.j1; j += 3) {
+      const p = { lat: (i * m) / 111200, lon: (j * m) / (111200 * Math.cos((57.7 * Math.PI) / 180)) };
+      const e = api.estimate(p, c, t), v = value(i, j);
+      n++;
+      // Right at a cut-off (45 min whole way, 30 min to a stop) flat and round-earth distances can round apart.
+      if (!e ? v < 200 : Math.abs(v - e.mins) > 1.5) off++;
     }
+    assert.ok(n > 300 && off / n < 0.02, `${off} of ${n} differ by more than 1.5 min`);
   }
+});
+
+test('the background worker gives exactly the same minutes as working them out on the page', () => {
+  const { api } = load();
+  const t = api.indexTable(TABLE), c = api.cfg();
+  const m = 250, view = api.fieldView([[11.85, 57.5], [12.2, 57.75]], m);
+  const here = api.fieldNow(view, m, c, [{ meta: { key: 'gbg-c' }, t }]);
+  // Run the worker's own code in a sandbox, with the messages the page sends it.
+  const posted = [];
+  const self = { postMessage: (msg) => posted.push(msg) };
+  vm.runInNewContext(api.fieldWorkerSource(), { self, Math, Map, Float32Array, Int32Array });
+  self.onmessage({ data: { type: 'table', key: 'k', stops: t.stops.map((s) => ({ lat: s.lat, lon: s.lon, min: s.min })),
+    dest: { lat: t.dest.lat, lon: t.dest.lon }, kmLon: t.kmLon } });
+  self.onmessage({ data: { type: 'field', id: 7, keys: ['k'], view, m, c: { walkSpeed: c.walkSpeed, bikeSpeed: c.bikeSpeed,
+    accessMax: c.accessMax, directMax: c.directMax, stationBuffer: c.stationBuffer, accessModes: c.accessModes } } });
+  assert.equal(posted[0].id, 7);
+  const vw = view.j1 - view.j0 + 1;
+  let same = 0;
+  for (let i = view.i0; i <= view.i1; i++) for (let j = view.j0; j <= view.j1; j++) {
+    assert.equal(posted[0].grid[(i - view.i0) * vw + (j - view.j0)], here(i, j));
+    same++;
+  }
+  assert.ok(same > 1000);
+});
+
+test('on the map, the minutes come from the background worker and the shading is drawn from its answer', async () => {
+  const sources = new Map();
+  let workerMessages = 0;
+  const before = (w) => {
+    // A worker that runs the script's worker code in a sandbox and answers a moment later, as a real one would.
+    w.Blob = class { constructor(parts) { this.src = parts.join(''); } };
+    w.URL.createObjectURL = (blob) => { w.__src = blob.src; return 'blob:test'; };
+    w.Worker = class {
+      constructor() {
+        this.self = { postMessage: (msg) => setTimeout(() => this.onmessage({ data: msg }), 5) };
+        vm.runInNewContext(w.__src, { self: this.self, Math, Map, Float32Array, Int32Array });
+      }
+      postMessage(data) { workerMessages++; setTimeout(() => this.self.onmessage({ data }), 5); }
+    };
+    const el = w.document.getElementById('map');
+    const fake = {
+      getContainer: () => el, getStyle: () => ({ sources: {}, layers: [] }), querySourceFeatures: () => [],
+      getPaintProperty: () => 1, setPaintProperty: () => {}, on: () => {}, getLayer: () => undefined,
+      getBounds: () => ({ toArray: () => [[11.85, 57.5], [12.15, 57.72]] }), getZoom: () => 11,
+      getSource: (id) => sources.get(id),
+      addSource: (id, src) => sources.set(id, { data: src.data, setData(d) { this.data = d; } }),
+      addLayer: () => {}, removeLayer: () => {}, removeSource: () => {},
+    };
+    el.__reactFiber$test = { stateNode: el, memoizedProps: { map: fake }, memoizedState: null, return: null };
+  };
+  const store = { ...STORE, config: { list: { dest: 'mine', max: 30, over: 'dim', sort: false } } };
+  load({ url: 'https://www.booli.se/sok/till-salu', body: '<div class="maplibregl-map" id="map"></div>', store, before });
+  await sleep(600);
+  assert.ok(workerMessages >= 2, 'the table and the request went to the worker');
+  const feats = sources.get('bcs-commute-shade').data.features;
+  assert.equal(shaded(feats, { lat: 57.55, lon: 12.0 }), true);
+  assert.equal(shaded(feats, { lat: 57.65, lon: 12.035 }), false);
 });
 
 test('estimate() runs in well under 1 ms per listing', () => {
@@ -274,28 +346,25 @@ test('areas over the limit are shaded under the dots, so grouped dots are covere
   assert.equal(shade.beforeId, 'listing-dots'); // under the dots
   assert.equal(layers.find((l) => l.id === 'bcs-commute-shade-edge').type, 'line'); // the limit's edge
   const feats = () => sources.get('bcs-commute-shade').data.features;
-  const boxes = () => feats().filter((f) => f.geometry.type === 'Polygon');
   assert.ok(feats().some((f) => f.geometry.type === 'LineString'));
-  const inside = (p) => boxes().some((f) => {
-    const [[w, s], [e,, ], [, n]] = f.geometry.coordinates[0];
-    return p.lon >= w && p.lon <= e && p.lat >= s && p.lat <= n;
-  });
   const t = api.indexTable(TABLE), c = api.cfg();
   const near = { lat: 57.65, lon: 12.035 }; // by Snabb buss: well under 30 min
   const far = { lat: 57.55, lon: 12.0 }; // by Långsam: over 30 min
   assert.ok(api.estimate(near, c, t).mins < 25 && api.estimate(far, c, t).mins > 35);
-  assert.equal(inside(near), false);
-  assert.equal(inside(far), true);
+  assert.equal(shaded(feats(), near), false);
+  assert.equal(shaded(feats(), far), true);
 
-  // Panning keeps the cells on the same lines: every corner stays on the first view's grid.
-  const corners = () => boxes().flatMap((f) => f.geometry.coordinates[0]);
-  const xs = [...new Set(corners().map(([x]) => x))].sort((a, b) => a - b);
-  const step = Math.min(...xs.slice(1).map((x, i) => x - xs[i]));
+  // Panning keeps the grid on the same lines: the same area gives exactly the same shapes.
+  const box = (f) => f.geometry.coordinates.flat(f.geometry.type === 'Polygon' ? 1 : 0)
+    .every(([x, y]) => x > 11.95 && x < 12.05 && y > 57.58 && y < 57.66);
+  const shapes = () => feats().filter(box).map((f) => JSON.stringify(f.geometry)).sort();
+  const first = shapes();
+  assert.ok(first.length > 3);
   view = [[11.873, 57.513], [12.173, 57.733]];
   fake.idle();
   await sleep(500);
-  assert.ok(corners().every(([x]) => Math.abs(x / step - Math.round(x / step)) < 1e-6), 'cells stay on the same grid lines');
-  assert.equal(inside(far), true);
+  assert.deepEqual(shapes(), first, 'cells stay on the same grid lines');
+  assert.equal(shaded(feats(), far), true);
   assert.equal(fake.idleCount, 1, 'one idle listener, however often the map is checked');
 });
 
@@ -319,13 +388,9 @@ test('zoomed out, a small pocket within the limit near a stop is not lost in a b
     config: { accessModes: { walk: true, bike: false, bus: true }, list: { dest: 'mine', max: 20, over: 'dim', sort: false } } };
   load({ url: 'https://www.booli.se/sok/till-salu', body: '<div class="maplibregl-map" id="map"></div>', store, before });
   await sleep(500);
-  const boxes = sources.get('bcs-commute-shade').data.features.filter((f) => f.geometry.type === 'Polygon');
-  const inside = (p) => boxes.some((f) => {
-    const [[w, s], [e], [, n]] = [f.geometry.coordinates[0][0], f.geometry.coordinates[0][1], f.geometry.coordinates[0][2]];
-    return p.lon >= w && p.lon <= e && p.lat >= s && p.lat <= n;
-  });
-  assert.equal(inside({ lat: 57.6205, lon: 11.8012 }), false, 'the stop itself is within the limit');
-  assert.equal(inside({ lat: 57.6205, lon: 11.9 }), true, '6 km away is over');
+  const feats = sources.get('bcs-commute-shade').data.features;
+  assert.equal(shaded(feats, { lat: 57.6205, lon: 11.8012 }), false, 'the stop itself is within the limit');
+  assert.equal(shaded(feats, { lat: 57.6205, lon: 11.9 }), true, '6 km away is over');
 });
 
 test('listings without a position stay visible and say "pendling okänd"', async () => {
