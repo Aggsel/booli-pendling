@@ -31,7 +31,7 @@ const LINDHOLMEN = { ...TABLE, destination: { key: 'lindholmen', name: 'Lindholm
   stops: TABLE.stops.map((r) => [r[0], r[1], r[2] + 10, ...r.slice(3)]) };
 const STORE = { 'table:index': INDEX(TABLE), 'table:gbg-c': { t: Date.now(), data: TABLE } };
 
-function load({ url = 'https://www.booli.se/', body = '', store = {} } = {}) {
+function load({ url = 'https://www.booli.se/', body = '', store = {}, before } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>${body}</body></html>`, { url, runScripts: 'outside-only', pretendToBeVisual: true });
   const w = dom.window;
   const values = new Map(Object.entries(store));
@@ -43,6 +43,7 @@ function load({ url = 'https://www.booli.se/', body = '', store = {} } = {}) {
   w.GM_setClipboard = () => {};
   w.fetch = async (u) => { requests.push(String(u)); return { text: async () => '' }; };
   w.__BCS_TEST__ = {};
+  if (before) before(w);
   w.eval(SRC);
   opened.push(w);
   return { w, api: w.__BCS_TEST__, values, requests, close: () => {} };
@@ -162,6 +163,35 @@ test('a stray card elsewhere on the page does not move the filter bar away from 
   const body = `<header><div class="carousel">${card({ id: 999100 })}</div></header>${pageHtml}`;
   const { w } = load({ url: 'https://www.booli.se/sok/till-salu?areaIds=22', body, store: STORE });
   assert.equal(w.document.querySelector('[data-bcs-filter]').nextElementSibling.id, 'list');
+});
+
+test('map dots over the limit are dimmed through the map layer', () => {
+  const calls = [];
+  let fake;
+  const before = (w) => {
+    const el = w.document.getElementById('map');
+    fake = {
+      getContainer: () => el,
+      getStyle: () => ({ sources: { listings: { type: 'geojson' }, osm: { type: 'vector' } },
+        layers: [{ id: 'roads', type: 'line', source: 'osm' }, { id: 'dots', type: 'circle', source: 'listings' }] }),
+      querySourceFeatures: (name) => (name === 'listings'
+        ? listings.map((l) => ({ geometry: { type: 'Point', coordinates: [l.lon, l.lat] }, properties: { booliId: l.id, price: 1 } })) : []),
+      getPaintProperty: () => 0.9,
+      setPaintProperty: (...a) => calls.push(a),
+      on: () => {},
+    };
+    // React keeps the map in a hook's ref on the map component, reachable from the container element.
+    el.__reactFiber$test = { stateNode: el, memoizedProps: {}, memoizedState: null,
+      return: { stateNode: null, memoizedProps: {}, memoizedState: { memoizedState: { current: fake }, next: null }, return: null } };
+  };
+  const store = { ...STORE, config: { list: { table: 'auto', max: 40, over: 'dim', sort: false } } };
+  const { api } = load({ url: 'https://www.booli.se/sok/till-salu', body: `<div class="maplibregl-map" id="map"></div>${pageHtml}`, store, before });
+  const t = api.indexTable(TABLE), c = api.cfg();
+  const over = listings.filter((l) => { const e = api.estimate(l, c, t); return e && e.mins > 40; }).map((l) => String(l.id));
+  assert.ok(over.length);
+  const opacity = calls.filter(([id, prop]) => id === 'dots' && prop === 'circle-opacity').pop();
+  assert.deepEqual(JSON.parse(JSON.stringify(opacity[2])), ['case', ['in', ['to-string', ['get', 'booliId']], ['literal', over]], 0.25, 0.9]);
+  assert.ok(!calls.some(([id]) => id === 'roads'));
 });
 
 test('listings without a position stay visible and say "pendling okänd"', async () => {

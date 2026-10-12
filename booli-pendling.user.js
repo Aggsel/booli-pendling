@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.6.1
+// @version      1.7.0
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -14,6 +14,8 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_setClipboard
+// @grant        unsafeWindow
+// @sandbox      JavaScript
 // @connect      api.resrobot.se
 // @connect      routing.openstreetmap.de
 // @connect      overpass-api.de
@@ -1748,6 +1750,7 @@
       if (line) fillCard(line, id, url, c);
     }
     decorateListCards(c);
+    dimMap(c);
   }
 
   function findListCards() {
@@ -1932,6 +1935,105 @@
     if (filterBar) filterBar.remove();
     document.querySelectorAll('[data-bcs-f]').forEach((el) => { el.style.display = ''; el.style.opacity = ''; delete el.dataset.bcsF; });
     document.querySelectorAll('[data-bcs-sort]').forEach(unsort);
+  }
+
+  // ---------- map dots ----------
+  // Booli's map is MapLibre, drawn on a canvas. Dots over the limit are dimmed or hidden by changing the dot layers'
+  // opacity for those listings. Each dot's commute comes from its own position, so every dot on the map is covered.
+  const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+  const raw = (o) => (o && o.wrappedJSObject) || o; // Firefox: see the page's own properties
+  const toPage = (v) => (typeof cloneInto === 'function' ? cloneInto(v, pageWin) : v);
+  const pageFn = (fn) => (typeof exportFunction === 'function' ? exportFunction(fn, pageWin) : fn);
+  const isMap = (m) => !!m && typeof m === 'object' && typeof m.getStyle === 'function' && typeof m.setPaintProperty === 'function' && typeof m.querySourceFeatures === 'function';
+  const MAP_OPACITY = { circle: ['circle-opacity', 'circle-stroke-opacity'], symbol: ['icon-opacity', 'text-opacity'] };
+  const MAP_ID_KEYS = ['booliId', 'listingId', 'residenceId', 'id'];
+
+  // The map isn't global. React keeps it in the map component's props, state or refs, reachable from the container.
+  let mapRef = null;
+  function findMap() {
+    const el = raw(pageWin.document.querySelector('.maplibregl-map, .mapboxgl-map'));
+    if (!el) return null;
+    try { if (mapRef && el.contains(mapRef.getContainer())) return mapRef; } catch {}
+    const seen = new Set();
+    const look = (v, depth) => {
+      if (!v || typeof v !== 'object' || depth > 3 || seen.has(v)) return null;
+      seen.add(v);
+      if (isMap(v)) return v;
+      try { if (typeof v.getMap === 'function') { const m = v.getMap(); if (isMap(m)) return m; } } catch {}
+      for (const k of ['current', 'map', '_map', 'mapRef', 'instance', 'value']) {
+        try { const r = look(v[k], depth + 1); if (r) return r; } catch {}
+      }
+      return null;
+    };
+    for (let node = el, n = 0; node && n < 6; node = node.parentElement, n++) {
+      const key = Object.keys(node).find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+      if (!key) continue;
+      for (let f = node[key], i = 0; f && i < 60; f = f.return, i++) {
+        let r = look(f.stateNode, 0) || look(f.memoizedProps, 0) || look(f.ref, 0);
+        for (let h = f.memoizedState, j = 0; !r && h && typeof h === 'object' && j < 40; h = h.next, j++) r = look(h.memoizedState, 0);
+        if (r) return (mapRef = r);
+      }
+    }
+    return null;
+  }
+
+  // The listings' dots: a GeoJSON source with one point per listing, an id property, and the layers that draw it.
+  function mapListings(map) {
+    const style = map.getStyle();
+    for (const [name, src] of Object.entries(style.sources || {})) {
+      if (src.type !== 'geojson') continue;
+      let feats;
+      try { feats = [...map.querySourceFeatures(name)]; } catch { continue; }
+      const points = feats.filter((f) => f.geometry && f.geometry.type === 'Point' && !(f.properties || {}).point_count);
+      if (!points.length) continue;
+      const props = points[0].properties || {};
+      const idProp = MAP_ID_KEYS.find((k) => k in props) || Object.keys(props).find((k) => /^\d{5,9}$/.test(String(props[k])));
+      const layers = style.layers.filter((l) => l.source === name && MAP_OPACITY[l.type]);
+      if (!idProp || !layers.length) continue;
+      const byId = new Map();
+      for (const f of points) {
+        const id = String(f.properties[idProp]);
+        if (!byId.has(id)) byId.set(id, { id, lon: +f.geometry.coordinates[0], lat: +f.geometry.coordinates[1] });
+      }
+      return { source: name, idProp, layers, dots: [...byId.values()] };
+    }
+    return null;
+  }
+
+  let mapSig = '';
+  let mapHooked = null;
+  const mapOriginals = new Map();
+  function dimMap(c) {
+    let map;
+    try { map = findMap(); } catch { return; }
+    if (!map) return;
+    if (mapHooked !== map) { // the map redraws without touching the page: check again whenever it settles
+      mapHooked = map;
+      try { map.on('idle', pageFn(() => dimMap(cfg()))); } catch {}
+    }
+    try {
+      const info = mapListings(map);
+      if (!info) return;
+      const ts = tablesFor(c).filter((x) => x.t !== 'loading');
+      const max = +c.list.max || 0;
+      const over = !ts.length || !max ? [] : info.dots.filter((p) => {
+        const es = ts.map((x) => estimate(p, c, x.t));
+        return es.every(Boolean) && Math.max(...es.map((e) => e.mins)) > max;
+      }).map((p) => p.id);
+      const sig = `${info.source}|${c.list.over}|${over.join(',')}`;
+      if (sig === mapSig) return;
+      mapSig = sig;
+      const to = c.list.over === 'hide' ? 0 : 0.25;
+      for (const layer of info.layers) for (const prop of MAP_OPACITY[layer.type]) {
+        const k = `${layer.id}|${prop}`;
+        if (!mapOriginals.has(k)) { const v = map.getPaintProperty(layer.id, prop); mapOriginals.set(k, v === undefined ? null : v); }
+        const orig = mapOriginals.get(k);
+        const value = over.length
+          ? ['case', ['in', ['to-string', ['get', info.idProp]], ['literal', over]], to, typeof orig === 'number' ? orig : 1]
+          : orig;
+        map.setPaintProperty(layer.id, prop, toPage(value));
+      }
+    } catch {}
   }
 
   // Without a table for your destination, each card gets a small "Visa pendling" button, so nothing is fetched
@@ -2808,6 +2910,32 @@
     };
     GM_setClipboard(JSON.stringify(debug, null, 2));
     alert('Listdata kopierad. Klistra in den i chatten.');
+  });
+  // How Booli's map is built: whether the script can reach it and which layer draws the dots.
+  GM_registerMenuCommand('Kopiera kartdata för felsökning', () => {
+    const el = pageWin.document.querySelector('.maplibregl-map, .mapboxgl-map');
+    const markers = document.querySelectorAll('.maplibregl-marker, .mapboxgl-marker');
+    const debug = { url: location.href, version: typeof GM_info !== 'undefined' ? GM_info.script.version : null, mapElement: !!el,
+      reactKeys: el ? Object.keys(raw(el)).filter((k) => k.startsWith('__react')) : [], domMarkers: markers.length,
+      sampleMarker: markers[0] ? markers[0].outerHTML.slice(0, 800) : null };
+    try {
+      const map = findMap();
+      debug.mapInstance = !!map;
+      if (map) {
+        const style = map.getStyle();
+        debug.sources = Object.entries(style.sources || {}).map(([k, v]) => ({ name: k, type: v.type, cluster: v.cluster || false }));
+        debug.layers = style.layers.filter((l) => style.sources[l.source] && style.sources[l.source].type === 'geojson')
+          .map((l) => ({ id: l.id, type: l.type, source: l.source, filter: l.filter || null }));
+        const info = mapListings(map);
+        debug.dots = info ? { source: info.source, idProp: info.idProp, layers: info.layers.map((l) => l.id), count: info.dots.length, sample: info.dots.slice(0, 3) } : null;
+        debug.sampleFeatures = debug.sources.filter((x) => x.type === 'geojson').map((x) => {
+          const f = [...map.querySourceFeatures(x.name)][0];
+          return f ? { source: x.name, geometry: f.geometry && f.geometry.type, properties: JSON.parse(JSON.stringify(f.properties || {})) } : { source: x.name, none: true };
+        });
+      }
+    } catch (e) { debug.error = String(e && e.message); }
+    GM_setClipboard(JSON.stringify(debug, null, 2));
+    alert('Kartdata kopierad. Klistra in den i chatten.');
   });
   if (window.__BCS_TEST__) Object.assign(window.__BCS_TEST__, { estimate, indexTable, positionsIn, cfg, DEFAULTS });
   GM_registerMenuCommand('Kopiera positionsdata för felsökning', async () => {
