@@ -279,6 +279,10 @@ const PANEL = `<div id="sokfilter"><h2>Sökfilter</h2><div class="sections">
 // Like the real panel: the Bostadstyp heading and its tiles share one wrapper inside the section.
 const PANEL_WRAPPED = PANEL.replace('<section class="sec"><h3 class="sec-h">Bostadstyp</h3><div class="tiles">', '<section class="sec"><div class="stack"><h3 class="sec-h">Bostadstyp</h3><div class="tiles">')
   .replace('<span>Gård</span></button></div></section>', '<span>Gård</span></button></div></div></section>');
+// Booli's sort button and its open menu: options with the chosen one carrying a check mark.
+const SORT_MENU = `<div id="sorting"><button id="sortbtn" aria-haspopup="listbox" aria-expanded="true"><span>Nyast</span><svg class="chev"></svg></button>
+  <ul class="menu" role="listbox"><li class="mi mi-on"><span>Nyast</span><svg class="check"></svg></li><li class="mi"><span>Äldst</span></li>
+  <li class="mi"><span>Pris (Lägst)</span></li></ul></div>`;
 const ctl = (doc, f) => doc.querySelector(`[data-bcs-panel] [data-f="${f}"]`);
 const est = (doc, id, key = 'gbg-c') => doc.querySelector(`[data-bcs-est="${id}:${key}"]`);
 const item = (doc, id) => est(doc, id).closest('li');
@@ -301,7 +305,7 @@ test('result list: every card shows an estimate at once, without a key and witho
 });
 
 test('filter hides or dims exactly the cards over the limit, sorting reorders them, and both survive a redraw', async () => {
-  const { w, api, values, close } = load({ url: 'https://www.booli.se/sok/till-salu?areaIds=22', body: PANEL + pageHtml, store: STORE });
+  const { w, api, values, close } = load({ url: 'https://www.booli.se/sok/till-salu?areaIds=22', body: PANEL + SORT_MENU + pageHtml, store: STORE });
   const doc = w.document;
   const t = api.indexTable(TABLE), c = api.cfg();
   const mins = Object.fromEntries(listings.map((l) => [l.id, (api.estimate(l, c, t) || {}).mins]));
@@ -322,7 +326,7 @@ test('filter hides or dims exactly the cards over the limit, sorting reorders th
   assert.deepEqual(hidden(), []);
   assert.deepEqual(listings.filter((l) => item(doc, l.id).style.opacity === '0.35').map((l) => l.id), over);
 
-  sel('sort').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  doc.querySelector('[data-bcs-sort-item]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   const shown = () => listings.map((l) => ({ id: l.id, order: +item(doc, l.id).style.order })).sort((a, b) => a.order - b.order).map((x) => mins[x.id] ?? 1e6);
   assert.deepEqual(shown(), [...shown()].sort((a, b) => a - b));
 
@@ -554,7 +558,7 @@ test('choosing a destination in Sökfilter switches every card to that table', (
 });
 
 test('the controls are a section in Booli\'s Sökfilter panel, built from its own parts', async () => {
-  const { w, values } = load({ url: 'https://www.booli.se/sok/till-salu', body: PANEL + pageHtml, store: STORE });
+  const { w } = load({ url: 'https://www.booli.se/sok/till-salu', body: PANEL + pageHtml, store: STORE });
   const doc = w.document, section = doc.querySelector('[data-bcs-panel]');
   // Last, after "Nyproduktion / Snart till salu", with Booli's own classes.
   assert.match(section.previousElementSibling.textContent, /Nyproduktion[\s\S]*Snart till salu/);
@@ -565,14 +569,7 @@ test('the controls are a section in Booli\'s Sökfilter panel, built from its ow
   assert.deepEqual(labels, ['Pendling till', 'Max restid', 'Över gränsen']);
   assert.ok([...section.querySelectorAll('select')].every((s) => s.className === 'sel' && !s.name));
   assert.equal(section.querySelector('.pair').children.length, 3);
-  // The sort tile: off looks like an unchosen Bostadstyp tile, on like the chosen one (Villa).
-  const sort = ctl(doc, 'sort');
-  assert.equal(sort.className, 'tile');
-  assert.equal(sort.textContent.includes('Sortera efter pendling'), true);
-  sort.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  assert.equal(values.get('config').list.sort, true);
-  assert.equal(ctl(doc, 'sort').className, 'tile tile-on');
-  assert.equal(ctl(doc, 'sort').getAttribute('aria-pressed'), 'true');
+  assert.equal(ctl(doc, 'sort'), null, 'sorting lives in Booli\'s sort menu');
   // Booli redraws and adds a part at the end: the section moves back after Snart till salu.
   const extra = doc.createElement('section');
   extra.className = 'sec';
@@ -594,7 +591,32 @@ test('when heading and tiles share a wrapper, the section copies the wrapper wit
   assert.equal(stack.querySelector('[data-bcs-row="mode"]').className, 'tiles');
   assert.deepEqual([...section.querySelectorAll('span')].map((x) => x.textContent).filter((x) => /Lägenhet|Villa|Gård/.test(x)), [],
     'none of Booli\'s Bostadstyp tiles came along');
-  assert.equal(w.document.querySelectorAll('button.tile').length, 3 + 3, 'Booli\'s three, and our Kollektivt, Bil and sorting');
+  assert.equal(w.document.querySelectorAll('button.tile').length, 3 + 2, 'Booli\'s three, and our Kollektivt and Bil');
+});
+
+test('"Pendling (Kortast)" is an option in Booli\'s sort menu, and Booli\'s own options turn it off', () => {
+  const { w, values } = load({ url: 'https://www.booli.se/sok/till-salu', body: SORT_MENU + pageHtml, store: STORE });
+  const doc = w.document, menu = doc.querySelector('.menu');
+  let toggled = 0;
+  doc.getElementById('sortbtn').addEventListener('click', () => toggled++);
+  const mine = menu.lastElementChild;
+  assert.ok(mine.hasAttribute('data-bcs-sort-item'));
+  assert.equal(mine.className, 'mi', 'a copy of one of Booli\'s options');
+  assert.equal(mine.textContent.trim(), 'Pendling (Kortast)');
+  assert.equal(mine.querySelector('svg'), null, 'no check mark while not chosen');
+
+  mine.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  assert.equal(values.get('config').list.sort, true);
+  assert.equal(toggled, 1, 'the menu is closed');
+  assert.equal(doc.querySelector('#sortbtn span').textContent, 'Pendling (Kortast)');
+  assert.ok(mine.querySelector('svg.check'), 'ours has the check mark');
+  assert.equal(menu.querySelector('.mi-on svg.check').style.visibility, 'hidden', 'Booli\'s is hidden');
+
+  menu.children[1].dispatchEvent(new w.MouseEvent('click', { bubbles: true })); // Äldst
+  assert.equal(values.get('config').list.sort, false);
+  assert.equal(doc.querySelector('#sortbtn span').textContent, 'Nyast', 'Booli\'s own name back (Booli then shows its new choice)');
+  assert.equal(mine.querySelector('svg'), null);
+  assert.equal(menu.querySelector('.mi-on svg.check').style.visibility, '');
 });
 
 test('on the page, one line under Sökfilter says what is active and opens Sökfilter', () => {
