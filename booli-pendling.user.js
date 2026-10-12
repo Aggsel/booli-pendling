@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.5.0
+// @version      1.5.1
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -2736,6 +2736,36 @@
   decorateCards();
 
   GM_registerMenuCommand('Pendlingsinställningar', () => openSettings());
+  // What the list estimates see on this page: the script version, the table, the destination and the cards found.
+  GM_registerMenuCommand('Kopiera listdata för felsökning', () => {
+    const c = cfg();
+    const meta = TABLES.find((x) => x.key === c.list.table);
+    const stored = meta ? GM_getValue(`table:${meta.key}`, null) : null;
+    const idx = meta ? tableMem.get(meta.key) : null;
+    const t = tableFor(c);
+    const cards = findListCards();
+    const anchors = [...document.querySelectorAll('a[href]')].filter((a) => LISTING_HREF.test(a.getAttribute('href') || ''));
+    const sample = anchors[0] && (anchors[0].closest('li, article') || anchors[0].parentElement);
+    const debug = {
+      url: location.href,
+      version: typeof GM_info !== 'undefined' ? GM_info.script.version : null,
+      hasKey: !!c.apiKey,
+      list: c.list,
+      destinations: c.destinations.map((d) => ({ name: d.name, lat: d.lat, lon: d.lon, weight: d.weight })),
+      table: {
+        stored: stored ? { fetched: new Date(stored.t).toISOString(), version: stored.data && stored.data.version, serviceDate: stored.data && stored.data.serviceDate, rows: stored.data && (stored.data.stops || []).length } : null,
+        inMemory: !!idx, failed: meta ? tablesFailed.has(meta.key) : null, state: t && typeof t === 'object' ? 'ready' : t,
+      },
+      listingLinks: anchors.length,
+      cardsFound: cards.length,
+      positionsKnown: cards.filter((x) => knownPos(x.id)).length,
+      estimates: cards.slice(0, 5).map((x) => ({ id: x.id, pos: knownPos(x.id), text: (x.line.querySelector('[data-bcs-est]') || {}).textContent || null })),
+      filterBar: !!document.querySelector('[data-bcs-filter]'),
+      sampleCardHtml: sample ? sample.outerHTML.slice(0, 3000) : null,
+    };
+    GM_setClipboard(JSON.stringify(debug, null, 2));
+    alert('Listdata kopierad. Klistra in den i chatten.');
+  });
   if (window.__BCS_TEST__) Object.assign(window.__BCS_TEST__, { estimate, indexTable, positionsIn, cfg, DEFAULTS });
   GM_registerMenuCommand('Kopiera positionsdata för felsökning', async () => {
     const id = listingId();

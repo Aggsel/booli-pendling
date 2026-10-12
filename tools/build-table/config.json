@@ -4,10 +4,9 @@
   "arriveBy": "08:00",
   "maxMinutes": 120,
   "destinations": [
-    { "key": "gbg-c", "name": "Göteborg Centralstation", "stopNamePattern": "^Göteborg Centralstation", "lat": 57.7089, "lon": 11.9735, "radius": 200 }
+    { "key": "gbg-c", "name": "Göteborg Centralstation", "stopNamePattern": "^Göteborg Central$", "lat": 57.7089, "lon": 11.9735, "radius": 200 }
   ],
   "spotCheck": [
-    "Mölndal station", "Lindome station", "Kungsbacka station", "Partille station", "Lerum station",
-    "Alingsås station", "Kungälv Busstation", "Hisings Backa torg", "Frölunda torg", "Angered centrum"
+    "Mölndal station", "Lindome station", "Kungsbacka station", "Partille station", "Lerum station", "Alingsås station", "Kungälv resecentrum", "Backa Kyrkogata", "Frölunda Torg", "Angered Centrum"
   ]
 }

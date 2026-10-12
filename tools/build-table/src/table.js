@@ -3,7 +3,9 @@ import { activeServices, candidateTuesdays, addDays } from './service-day.js';
 import { latestDepartures, lastDepartures, byArrivalDesc, byDepartureAsc, modeLetters, MODE_BITS } from './csa.js';
 
 const H = 3600;
-const EVENING_FROM = 18 * H, EVENING_UNTIL = 28 * H, MAX_TRIP_HOME = 3 * H;
+// The evening ends at 03:00: Västtrafik's first morning buses leave Göteborg C just before 04:00 and would
+// otherwise count as everyone's "last trip home".
+const EVENING_FROM = 18 * H, EVENING_UNTIL = 27 * H, MAX_TRIP_HOME = 3 * H;
 const FOOT_RADIUS_M = 300, WALK_MS = 4.5 / 3.6, DETOUR = 1.3;
 const DEFAULT_CHANGE = 120;
 
