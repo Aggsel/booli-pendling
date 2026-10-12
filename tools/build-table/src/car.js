@@ -1,5 +1,6 @@
 // Driving times to each destination from a grid of points, from a local OSRM server (the job starts one).
-// OSRM gives free-flowing traffic; times are multiplied by a rush-hour factor and get a few minutes for parking.
+// OSRM gives free-flowing traffic (no queues); times get a few minutes for parking. A flat rush-hour factor was
+// dropped: it penalised long motorway trips the most, while real queues sit at a few bottlenecks.
 const KM_LAT = 111.2;
 export const NO_ROAD = 255;
 
@@ -42,8 +43,8 @@ export async function carMinutes(osrm, car, dest, { batch = 250, fetchFn = fetch
       const secs = body.durations[n][0];
       const snap = body.sources[n].distance; // metres from the point to the nearest road
       if (secs == null || snap > car.maxSnapM) return; // the sea, a forest, no road nearby
-      // Rush hour, then the walk from the point to the road and a few minutes to park.
-      const mins = (secs / 60) * car.rushFactor + ((snap / 1000) / 5) * 60 + car.parkMinutes;
+      // Driving, then the walk from the point to the road and a few minutes to park.
+      const mins = secs / 60 + ((snap / 1000) / 5) * 60 + car.parkMinutes;
       out[p.k] = Math.min(NO_ROAD - 1, Math.round(mins));
     });
   }
@@ -56,7 +57,6 @@ export function carTable(dest, d, { grid: g, minutes }, car) {
     destination: { key: d.key, name: d.name, label: d.label || d.name, lat: dest.lat, lon: dest.lon },
     generated: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
     source: 'OpenStreetMap (OSRM)',
-    rushFactor: car.rushFactor,
     parkMinutes: car.parkMinutes,
     grid: { lat0: g.lat0, lon0: g.lon0, dLat: g.dLat, dLon: g.dLon, rows: g.rows, cols: g.cols },
     minutes: Buffer.from(minutes).toString('base64'), // one byte per point, row by row from the south; 255 = no road

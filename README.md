@@ -4,7 +4,7 @@ Se restiden till jobbet direkt på Booli. Skriptet lägger till **Pendling** och
 
 - Snabbaste vägen till dina resmål: kollektivtrafik, cykel eller gång till stationen plus tåg, eller cykel hela vägen
 - Sista resan hem på kvällen
-- Närmaste matbutik, skola och förskola, och körtid i rusning
+- Närmaste matbutik, skola och förskola, och körtid med bil
 - Fungerar i hela Sverige
 - I sökresultaten: ungefärlig restid för varje bostad till ett av arton resmål (Göteborg C, Lindholmen, Gamlestaden, Chalmers, Sahlgrenska, Östra sjukhuset, Korsvägen, Mölndal, AstraZeneca Mölndal, Volvo Torslanda, Frölunda Torg, Landvetter flygplats, Volvo Lundby, Eriksberg, Hjalmar Brantingsplatsen, Linnéplatsen, Arendal och Amhult) eller till dina egna, med kollektivtrafik eller bil, filter på längsta restid under Sökfilter och lila markering på kartan där restiden är längre. Det fungerar utan nyckel och gör inga anrop till Trafiklab.
 
@@ -32,10 +32,10 @@ Tampermonkey letar efter nya versioner automatiskt och installerar dem. Dina ins
 
 - Kollektivtrafik: [Trafiklab](https://www.trafiklab.se) (ResRobot)
 - Restidstabell: Trafiklab (Samtrafiken), GTFS Regional
-- Körtider i listor och på kartan: © OpenStreetMap-bidragsgivare, beräknade med OSRM. Rusningstrafik är uppskattad (fritt flöde × 1,3 och 3 min att parkera).
+- Körtider i listor och på kartan: © OpenStreetMap-bidragsgivare, beräknade med OSRM. Körtiderna gäller utan köer, plus 3 min att parkera.
 - Gång-, cykel- och bilvägar, butiker, skolor och adresser: © [OpenStreetMap](https://www.openstreetmap.org/copyright)-bidragsgivare
 
-Körtid i rusning är en uppskattning. Närmaste skola betyder inte att ni får plats där.
+Körtiden med bil räknar inte med köer. Närmaste skola betyder inte att ni får plats där.
 
 ## Restidstabellen
 

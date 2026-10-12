@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.15.0
+// @version      1.16.0
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -78,7 +78,7 @@
     { key: 'lastHome', label: 'Sista hem', desc: 'När sista resan hem går' },
     { key: 'grocery', label: 'Matbutik', desc: 'Närmaste livsmedelsbutik', everyday: 'grocery' },
     { key: 'school', label: 'Skola', desc: 'Närmaste grundskola', everyday: 'school' },
-    { key: 'car', label: 'Bil', desc: 'Körtid i rusning till ditt viktigaste resmål', everyday: 'car' },
+    { key: 'car', label: 'Bil', desc: 'Körtid utan köer till ditt viktigaste resmål', everyday: 'car' },
   ];
   // A value tied to an "I vardagen" category is only available while that category is on.
   const kpiAvailable = (k, c) => !k.everyday || c.everyday[k.everyday].on;
@@ -389,7 +389,6 @@
   // OpenStreetMap's free services ask every client to identify itself.
   const OSM_HEADERS = { Accept: '*/*', 'User-Agent': 'BooliPendling/1.1 (Tampermonkey userscript, commute helper for booli.se)' };
   const NOMINATIM = 'https://nominatim.openstreetmap.org/search';
-  const RUSH_FACTOR = 1.3; // free-flow driving time × this ≈ rush hour (an estimate, labelled as such)
   const PLACE_RADIUS = 6000;
 
   function haversineKm(a, b) {
@@ -481,7 +480,7 @@
       for (const d of c.destinations) {
         if (!d.lat) continue;
         tasks.push(soft(cached(`car:${pk}:${d.id}`, () => routeKm('car', p, d))).then((r) => {
-          if (r) ev.cars[d.id] = { km: r.km, mins: Math.round(r.mins * RUSH_FACTOR) };
+          if (r) ev.cars[d.id] = { km: r.km, mins: Math.round(r.mins) };
         }));
       }
     }
@@ -822,7 +821,7 @@
     : `${e ? `ca ${e.mins} min` : 'pendling okänd'} till ${meta.label}`);
   function estTitle(e, t, c) {
     if (t.car) {
-      return e ? `Bil i rusningstrafik till ${t.dest.name}, uppskattad: fritt flöde × ${String(t.data.rushFactor).replace('.', ',')} och ${t.data.parkMinutes} min att parkera. Vägar: © OpenStreetMap.`
+      return e ? `Bil till ${t.dest.name} utan köer${t.data.rushFactor ? ` × ${String(t.data.rushFactor).replace('.', ',')} för rusning` : ''}, och ${t.data.parkMinutes} min att parkera. Vägar: © OpenStreetMap.`
         : `Ingen väg i närheten, eller utanför området med körtider (60 km runt Göteborg).`;
     }
     if (!e) return `Ingen hållplats eller väg inom räckhåll i tidtabellen till ${t.dest.name}.`;
@@ -1332,7 +1331,7 @@
       case 'car': {
         if (!st.ev) return pending();
         const cm = main && st.ev.cars[main.d.id];
-        return cm ? mins(cm.mins, 'med bil', iconHtml(ICON.car), `${main.d.name} i rusningstrafik (uppskattad), ${km1(cm.km)} km`) : none('–');
+        return cm ? mins(cm.mins, 'med bil', iconHtml(ICON.car), `${main.d.name} utan köer, ${km1(cm.km)} km`) : none('–');
       }
       case 'dests': {
         const x = r.dests.find((y) => y.d.id === spec.dest.id);
@@ -1461,7 +1460,7 @@
         const tc = tev && tev.cars[x.d.id];
         pend += rowHtml({
           name: `Bil till ${shortName(x.d.name)}`,
-          lines: [`Rusningstrafik, ${c.timeMode === 'arrive' ? 'framme' : 'avresa'} ${c.time} (uppskattad)`, `${km1(cm.km)} km`],
+          lines: ['Utan köer', `${km1(cm.km)} km`],
           mins: `${cm.mins} min`, caption: `${ICON.car} bil`,
           delta: dPill(deltaMins(cm.mins, tc && tc.mins)),
           href: mapsLink(r.p, x.d, 'driving'),
@@ -1518,7 +1517,7 @@
             deltaMins(r.station && r.station.best.mins, tr.station && tr.station.best.mins));
           if (c.everyday.car.on) {
             const a = ev && main && ev.cars[main.d.id], b = tev && main && tev.cars[main.d.id];
-            add('Bil i rusning', a ? m(a.mins) : null, b ? m(b.mins) : null, deltaMins(a && a.mins, b && b.mins));
+            add('Bil', a ? m(a.mins) : null, b ? m(b.mins) : null, deltaMins(a && a.mins, b && b.mins));
           }
           if (c.everyday.grocery.on) {
             const a = ev && ev.grocery && !ev.grocery.none ? ev.grocery : null, b = tev && tev.grocery && !tev.grocery.none ? tev.grocery : null;
@@ -2875,7 +2874,7 @@ self.onmessage = (e) => {
   const EV_CATS = [
     { key: 'grocery', title: 'Matbutik', desc: 'Närmaste livsmedelsbutik', modes: true },
     { key: 'school', title: 'Skola och förskola', desc: 'Närmaste grundskola och förskola', modes: true },
-    { key: 'car', title: 'Bil till resmålen', desc: 'Körtid i rusningstrafik, samma ankomsttid', modes: false },
+    { key: 'car', title: 'Bil till resmålen', desc: 'Körtid utan köer', modes: false },
   ];
   const EV_MODES = [{ v: 'walk', label: 'Gång' }, { v: 'bike', label: 'Cykel' }, { v: 'car', label: 'Bil' }];
 
@@ -3202,13 +3201,13 @@ self.onmessage = (e) => {
           <div class="field"><label for="lt">Pendling till, i listorna</label>
             <select id="lt" class="wide" data-k="lt" data-f="listDest">${destOpts.map(([v, l]) => opt(v, l, d.list.dest)).join('')}</select></div>
           ${on && hasCar() ? `<div class="field"><label for="lmode">Färdsätt</label>
-            <select id="lmode" class="wide" data-k="lmode" data-f="listMode">${opt('transit', 'Kollektivt', d.list.mode)}${opt('car', 'Bil (i rusning, uppskattad)', d.list.mode)}</select></div>` : ''}
+            <select id="lmode" class="wide" data-k="lmode" data-f="listMode">${opt('transit', 'Kollektivt', d.list.mode)}${opt('car', 'Bil (utan köer)', d.list.mode)}</select></div>` : ''}
           ${on ? `<div class="field"><label for="lmax">Max restid</label>
             <select id="lmax" class="wide" data-k="lmax" data-f="listMax">${opt(0, 'Alla', d.list.max)}${LIST_MAXES.map((m) => opt(m, `${m} min`, d.list.max)).join('')}</select></div>` : ''}
         </div>
         ${on ? `<div class="row"><span class="lbl" id="lo-l" style="margin:0">Över gränsen</span>${seg('listOver', [{ v: 'hide', label: 'Dölj' }, { v: 'dim', label: 'Tona ner' }], d.list.over, 'lo-l')}</div>
           ${status ? `<ul class="note" style="padding-left:1.2em">${status}</ul>` : ''}
-          <p class="note">Restidstabell: Trafiklab (Samtrafiken).${hasCar() ? ' Körtider: © OpenStreetMap-bidragsgivare (OSRM), rusning uppskattad.' : ''}</p>` : ''}
+          <p class="note">Restidstabell: Trafiklab (Samtrafiken).${hasCar() ? ' Körtider: © OpenStreetMap-bidragsgivare (OSRM), utan köer.' : ''}</p>` : ''}
       </section>`;
     }
 

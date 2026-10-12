@@ -178,7 +178,7 @@ function carTableFixture() {
     bytes[r * g.cols + c] = lon < 11.9 ? 255 : Math.round(km * 1.5 + 3);
   }
   return { version: 1, destination: { ...TABLE.destination, label: 'Göteborg C' }, generated: new Date().toISOString(),
-    source: 'test', rushFactor: 1.3, parkMinutes: 3, grid: g, minutes: Buffer.from(bytes).toString('base64') };
+    source: 'test', parkMinutes: 3, grid: g, minutes: Buffer.from(bytes).toString('base64') };
 }
 
 test('by car: Färdsätt appears once driving times exist, and Bil switches every card to them', () => {
