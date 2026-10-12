@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.7.1
+// @version      1.7.2
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -1750,7 +1750,7 @@
       if (line) fillCard(line, id, url, c);
     }
     decorateListCards(c);
-    dimMap(c);
+    scheduleMap();
   }
 
   function findListCards() {
@@ -1999,8 +1999,11 @@
       (groups.get(k) || groups.set(k, []).get(k)).push(l);
     }
     let best = null;
-    for (const [k, layers] of groups) {
+    const ordered = [...groups].sort(([a], [b]) => /listing/i.test(b) - /listing/i.test(a));
+    for (const [k, layers] of ordered) {
+      if (best) break; // a listing source that works is enough; the base map's label layers are huge
       const [name, sourceLayer] = k.split('|');
+      if (/protomaps|openmaptiles|basemap/i.test(name)) continue;
       const points = sourceFeatures(map, name, sourceLayer).filter((f) => f.geometry && f.geometry.type === 'Point'
         && !(f.properties || {}).point_count && !(f.properties || {}).cluster);
       if (!points.length) continue;
@@ -2025,41 +2028,77 @@
     return best;
   }
 
+  // The map is checked a moment after it settles, never on every frame. The dot layer is found once; after that
+  // each check only reads that layer's ids and positions, and every house's result is remembered.
   let mapSig = '';
   let mapHooked = null;
+  let mapTimer = null;
+  let dotSetup = null; // { source, sourceLayer, idKey, layers }
   const mapOriginals = new Map();
+  const dotOver = new Map(); // listing id → over the limit?
+  let dotOverKey = '';
+  const scheduleMap = () => { if (!mapTimer) mapTimer = setTimeout(() => { mapTimer = null; dimMap(cfg()); }, 400); };
+
+  // Only the dot layer's ids and positions, read straight from the page's objects (no copy of everything).
+  function currentDots(map, setup) {
+    const fs = setup.sourceLayer ? map.querySourceFeatures(setup.source, toPage({ sourceLayer: setup.sourceLayer })) : map.querySourceFeatures(setup.source);
+    const out = new Map();
+    for (let i = 0, n = fs.length; i < n; i++) {
+      const f = fs[i], pr = f.properties || {};
+      if (pr.point_count || pr.cluster) continue;
+      const g = f.geometry;
+      if (!g || g.type !== 'Point') continue;
+      const id = String(setup.idKey === ID_EXPR ? f.id : pr[setup.idKey]);
+      if (!out.has(id)) out.set(id, { id, lon: +g.coordinates[0], lat: +g.coordinates[1] });
+    }
+    return out;
+  }
+
   function dimMap(c) {
     let map;
     try { map = findMap(); } catch { return; }
     if (!map) return;
-    if (mapHooked !== map) { // the map redraws without touching the page: check again whenever it settles
+    if (mapHooked !== map) { // the map redraws without touching the page: check again once it settles
       mapHooked = map;
-      try { map.on('idle', pageFn(() => dimMap(cfg()))); } catch {}
+      dotSetup = null;
+      mapSig = '';
+      try { map.on('idle', pageFn(scheduleMap)); } catch {}
     }
     try {
-      const info = mapListings(map);
-      if (!info) return;
+      if (dotSetup && !dotSetup.layers.every((l) => map.getLayer(l.id))) dotSetup = null; // the style changed
+      if (!dotSetup) {
+        const info = mapListings(map);
+        if (!info) return;
+        dotSetup = { source: info.source, sourceLayer: info.sourceLayer, idKey: info.idKey, layers: info.layers };
+      }
       const ts = tablesFor(c).filter((x) => x.t !== 'loading');
       const max = +c.list.max || 0;
-      const over = !ts.length || !max ? [] : info.dots.filter((p) => {
-        const es = ts.map((x) => estimate(p, c, x.t));
-        return es.every(Boolean) && Math.max(...es.map((e) => e.mins)) > max;
-      }).map((p) => p.id);
-      const sig = `${info.source}|${info.idKey}|${c.list.over}|${over.join(',')}`;
+      const key = `${settingsSig(c)}|${max}|${ts.map((x) => `${x.meta.key}:${x.t.data.generated}`).join(',')}`;
+      if (key !== dotOverKey) { dotOverKey = key; dotOver.clear(); }
+      if (ts.length && max) {
+        for (const [id, p] of currentDots(map, dotSetup)) {
+          if (dotOver.has(id)) continue;
+          const es = ts.map((x) => estimate(p, c, x.t));
+          dotOver.set(id, es.every(Boolean) && Math.max(...es.map((e) => e.mins)) > max);
+        }
+      }
+      // Every house seen so far stays in the list, so panning back and forth doesn't redraw the layer.
+      const over = [...dotOver].filter(([, o]) => o).map(([id]) => id);
+      const sig = `${dotSetup.source}|${dotSetup.idKey}|${c.list.over}|${over.length}|${max}`;
       if (sig === mapSig) return;
       mapSig = sig;
       const to = c.list.over === 'hide' ? 0 : 0.25;
-      for (const layer of info.layers) for (const prop of MAP_OPACITY[layer.type]) {
+      const idOf = dotSetup.idKey === ID_EXPR ? ['id'] : ['get', dotSetup.idKey];
+      for (const layer of dotSetup.layers) for (const prop of MAP_OPACITY[layer.type]) {
         const k = `${layer.id}|${prop}`;
         if (!mapOriginals.has(k)) mapOriginals.set(k, plain(map.getPaintProperty(layer.id, prop)));
         const orig = mapOriginals.get(k);
-        const idOf = info.idKey === ID_EXPR ? ['id'] : ['get', info.idKey];
         const value = over.length
           ? ['case', ['in', ['to-string', idOf], ['literal', over]], to, typeof orig === 'number' ? orig : 1]
           : orig;
         map.setPaintProperty(layer.id, prop, toPage(value));
       }
-    } catch {}
+    } catch { dotSetup = null; }
   }
 
   // Without a table for your destination, each card gets a small "Visa pendling" button, so nothing is fetched

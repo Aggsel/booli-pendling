@@ -165,7 +165,7 @@ test('a stray card elsewhere on the page does not move the filter bar away from 
   assert.equal(w.document.querySelector('[data-bcs-filter]').nextElementSibling.id, 'list');
 });
 
-test('map dots over the limit are dimmed through the map layer', () => {
+test('map dots over the limit are dimmed through the map layer', async () => {
   const calls = [];
   let fake;
   const before = (w) => {
@@ -178,6 +178,7 @@ test('map dots over the limit are dimmed through the map layer', () => {
         ? listings.map((l) => ({ geometry: { type: 'Point', coordinates: [l.lon, l.lat] }, properties: { booliId: l.id, price: 1 } })) : []),
       getPaintProperty: () => 0.9,
       setPaintProperty: (...a) => calls.push(a),
+      getLayer: () => ({}),
       on: () => {},
     };
     // React keeps the map in a hook's ref on the map component, reachable from the container element.
@@ -186,6 +187,7 @@ test('map dots over the limit are dimmed through the map layer', () => {
   };
   const store = { ...STORE, config: { list: { table: 'auto', max: 40, over: 'dim', sort: false } } };
   const { api } = load({ url: 'https://www.booli.se/sok/till-salu', body: `<div class="maplibregl-map" id="map"></div>${pageHtml}`, store, before });
+  await sleep(500); // the map is checked a moment after it settles
   const t = api.indexTable(TABLE), c = api.cfg();
   const over = listings.filter((l) => { const e = api.estimate(l, c, t); return e && e.mins > 40; }).map((l) => String(l.id));
   assert.ok(over.length);
@@ -194,8 +196,8 @@ test('map dots over the limit are dimmed through the map layer', () => {
   assert.ok(!calls.some(([id]) => id === 'roads'));
 });
 
-test('map dots in vector tiles (like Booli\'s listingSource) are dimmed by feature id', () => {
-  const calls = [];
+test('map dots in vector tiles (like Booli\'s listingSource) are dimmed by feature id', async () => {
+  const calls = [], queried = [];
   const before = (w) => {
     const el = w.document.getElementById('map');
     const fake = {
@@ -205,11 +207,12 @@ test('map dots in vector tiles (like Booli\'s listingSource) are dimmed by featu
           { id: 'listing-dots', type: 'circle', source: 'listingSource', 'source-layer': 'listings' },
           { id: 'project-dots', type: 'circle', source: 'projectSource', 'source-layer': 'projects' }] }),
       // Vector tiles only answer with a source layer.
-      querySourceFeatures: (name, o) => (name === 'listingSource' && o && o.sourceLayer === 'listings'
+      querySourceFeatures: (name, o) => (queried.push(name), name === 'listingSource' && o && o.sourceLayer === 'listings'
         ? listings.map((l) => ({ id: l.id, geometry: { type: 'Point', coordinates: [l.lon, l.lat] }, properties: { type: 'villa', status: 1 } }))
         : name === 'projectSource' && o && o.sourceLayer === 'projects' ? [{ id: 77, geometry: { type: 'Point', coordinates: [12, 57.6] }, properties: {} }] : []),
       getPaintProperty: () => undefined,
       setPaintProperty: (...a) => calls.push(a),
+      getLayer: () => ({}),
       on: () => {},
     };
     el.__reactFiber$test = { stateNode: el, memoizedProps: {}, memoizedState: null,
@@ -217,8 +220,10 @@ test('map dots in vector tiles (like Booli\'s listingSource) are dimmed by featu
   };
   const store = { ...STORE, config: { list: { table: 'auto', max: 40, over: 'hide', sort: false } } };
   const { api } = load({ url: 'https://www.booli.se/sok/till-salu', body: `<div class="maplibregl-map" id="map"></div>${pageHtml}`, store, before });
+  await sleep(500);
   const t = api.indexTable(TABLE), c = api.cfg();
   const over = listings.filter((l) => { const e = api.estimate(l, c, t); return e && e.mins > 40; }).map((l) => String(l.id));
+  assert.ok(!queried.includes('protomaps'), 'the base map is never queried');
   const opacity = calls.filter(([id, prop]) => id === 'listing-dots' && prop === 'circle-opacity').pop();
   assert.deepEqual(JSON.parse(JSON.stringify(opacity[2])), ['case', ['in', ['to-string', ['id']], ['literal', over]], 0, 1]);
   assert.ok(!calls.some(([id]) => id !== 'listing-dots'));
