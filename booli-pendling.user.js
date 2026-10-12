@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.9.3
+// @version      1.9.4
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -2233,19 +2233,21 @@
   // Grouped dots can't be dimmed one by one, so the map itself is shaded: a grid over the visible area, cells over
   // the limit (or with no stop within reach) drawn light grey under the dots, and a dark line along the edge of the
   // area within the limit. Cells have fixed sizes (125 m, 250 m, 500 m …) on fixed lines, so they stay put as you
-  // pan and zoom. Along the edge the grid is finer: a cell that is only partly within the limit is split into
-  // smaller cells, so small pockets near a station show even when zoomed out.
+  // pan and zoom. Along the edge the grid is finer: a cell that is only partly within the limit is split 2 × 2, and
+  // only the parts that still straddle the limit are split again, so the work follows the edge's length, not its
+  // area, and small pockets near a station show even when zoomed out.
   const SHADE_ID = 'bcs-commute-shade';
   const SHADE_PX = 32; // base cell size on screen
-  const SHADE_SPLIT = 4; // edge cells are split into 4 × 4
-  const SHADE_MIN_M = 125; // smallest cell
+  const SHADE_SPLIT = 8; // edge cells are refined down to 1/8 of a base cell (about 4 px) …
+  const SHADE_MIN_M = 62.5; // … but never below this
   const SHADE_REF_LAT = 57.7; // fixed east-west spacing for the grid
   let shadeSig = '';
   const shadeMemo = new Map(); // cell or point → over the limit? Reused across panning and zooming.
   let shadeMemoKey = '';
 
   // judge.overAt(point, key): is this point over the limit? judge.allOver(rect, key): is every point in it over?
-  function shadeCells(bounds, zoom, judge) {
+  // A generator that pauses after each row of base cells, so the work can be spread out; returns the GeoJSON.
+  function* shadeSteps(bounds, zoom, judge) {
     const [[w0, s0], [e0, n0]] = bounds;
     const mPerPx = (156543.03 * Math.cos((SHADE_REF_LAT * Math.PI) / 180)) / 2 ** zoom;
     let cell = SHADE_MIN_M;
@@ -2266,23 +2268,25 @@
     const over = Array.from({ length: i1 - i0 }, () => new Array(j1 - j0));
     const fill = (I, J, v) => { for (let a = 0; a < split; a++) for (let b = 0; b < split; b++) over[I * split + a - i0][J * split + b - j0] = v; };
     const pointKey = (size, i, j) => `p${size}:${i}:${j}`;
+    // A cell of `size` fine cells at fine row i, column j: all over, all within, or split 2 × 2 and decided per part.
+    const decide = (i, j, size) => {
+      const fillCells = (v) => { for (let a = 0; a < size; a++) for (let b = 0; b < size; b++) over[i + a - i0][j + b - j0] = v; };
+      const m = fine * size;
+      const rect = [i * fLat, j * fLon, (i + size) * fLat, (j + size) * fLon];
+      if (judge.allOver(rect, `r${m}:${i / size}:${j / size}`)) return fillCells(true);
+      // Some point is within. Centre and corners on a grid of half cells, shared with the neighbours.
+      const at2 = (y, x) => judge.overAt({ lat: (y / 2) * fLat, lon: (x / 2) * fLon }, pointKey(fine, y, x));
+      const y0 = i * 2, x0 = j * 2, d = size * 2;
+      const centre = at2(y0 + size, x0 + size);
+      if (size === 1) return fillCells(centre);
+      const corners = [[y0, x0], [y0 + d, x0], [y0, x0 + d], [y0 + d, x0 + d]].map(([y, x]) => at2(y, x));
+      if (!centre && corners.every((o) => !o)) return fillCells(false);
+      const h = size / 2;
+      decide(i, j, h); decide(i + h, j, h); decide(i, j + h, h); decide(i + h, j + h, h);
+    };
     for (let I = I0; I < I1; I++) {
-      for (let J = J0; J < J1; J++) {
-        const rect = [I * dLat, J * dLon, (I + 1) * dLat, (J + 1) * dLon];
-        if (judge.allOver(rect, `r${cell}:${I}:${J}`)) { fill(I, J, true); continue; }
-        // Some point is within. If the centre and the corners are too, take the whole cell as within.
-        const samples = [[I + 0.5, J + 0.5], [I, J], [I + 1, J], [I, J + 1], [I + 1, J + 1]];
-        const someOver = split > 1 && samples.some(([y, x]) => judge.overAt({ lat: y * dLat, lon: x * dLon }, pointKey(cell, y * 2, x * 2)));
-        if (!someOver) {
-          if (split === 1) fill(I, J, judge.overAt({ lat: (I + 0.5) * dLat, lon: (J + 0.5) * dLon }, pointKey(cell, I * 2 + 1, J * 2 + 1)));
-          else fill(I, J, false);
-          continue;
-        }
-        for (let a = 0; a < split; a++) for (let b = 0; b < split; b++) {
-          const i = I * split + a, j = J * split + b;
-          over[i - i0][j - j0] = judge.overAt({ lat: (i + 0.5) * fLat, lon: (j + 0.5) * fLon }, pointKey(fine, i * 2 + 1, j * 2 + 1));
-        }
-      }
+      for (let J = J0; J < J1; J++) decide(I * split, J * split, split);
+      yield;
     }
     const at = (i, j) => over[i - i0][j - j0];
     const features = [];
@@ -2318,10 +2322,35 @@
     }
     return { type: 'FeatureCollection', features };
   }
+  function shadeCells(bounds, zoom, judge) { // all at once
+    const steps = shadeSteps(bounds, zoom, judge);
+    let r;
+    do r = steps.next(); while (!r.done);
+    return r.value;
+  }
+  // Runs the steps in slices of at most 12 ms, so the map stays responsive. A newer view drops an unfinished pass.
+  let shadeJob = 0;
+  let shadeRunning = false;
+  function runShade(steps, done) {
+    const job = ++shadeJob;
+    shadeRunning = true;
+    const slice = () => {
+      if (job !== shadeJob) return;
+      const t0 = performance.now();
+      let r;
+      do r = steps.next(); while (!r.done && performance.now() - t0 < 12);
+      if (!r.done) return void setTimeout(slice, 0);
+      shadeRunning = false;
+      done(r.value);
+    };
+    slice();
+  }
 
   function shadeMap(map, c, ts, max) {
     const on = ts.length && max;
     if (!on) {
+      shadeJob++; // drop any pass still running
+      shadeRunning = false;
       for (const id of [`${SHADE_ID}-edge`, SHADE_ID]) if (map.getLayer(id)) map.removeLayer(id);
       if (map.getSource(SHADE_ID)) map.removeSource(SHADE_ID);
       shadeSig = '';
@@ -2332,7 +2361,7 @@
     const r = (v) => v.toFixed(3);
     const memoKey = `${settingsSig(c)}|${max}|${ts.map((x) => `${x.meta.key}:${x.t.data.generated}`).join(',')}`;
     const sig = `${b.flat().map(r).join(',')}|${Math.round(zoom * 2)}|${c.list.over}|${memoKey}`;
-    if (sig === shadeSig && map.getLayer(SHADE_ID)) return;
+    if (sig === shadeSig && (shadeRunning || map.getLayer(SHADE_ID))) return; // drawn, or being worked out
     shadeSig = sig;
     if (memoKey !== shadeMemoKey || shadeMemo.size > 200000) { shadeMemoKey = memoKey; shadeMemo.clear(); }
     const memo = (key, fn) => {
@@ -2340,11 +2369,15 @@
       if (v === undefined) shadeMemo.set(key, (v = fn()));
       return v;
     };
-    const data = shadeCells(b, zoom, {
+    const steps = shadeSteps(b, zoom, {
       // Over the limit for any destination counts as over (the list uses the longest commute).
       overAt: (p, key) => memo(key, () => ts.some((x) => !reachable([p.lat, p.lon, p.lat, p.lon], c, x.t, max))),
       allOver: (rect, key) => memo(key, () => ts.some((x) => !reachable(rect, c, x.t, max))),
     });
+    runShade(steps, (data) => { try { drawShade(map, c, data); } catch { shadeSig = ''; } });
+  }
+
+  function drawShade(map, c, data) {
     const src = map.getSource(SHADE_ID);
     if (src) src.setData(toPage(data));
     else map.addSource(SHADE_ID, toPage({ type: 'geojson', data }));
