@@ -15,7 +15,13 @@
     { "key": "astrazeneca", "name": "AstraZeneca", "label": "AstraZeneca Mölndal", "stopNamePattern": "^AstraZeneca$", "lat": 57.64366, "lon": 12.01755, "radius": 150 },
     { "key": "volvo-torslanda", "name": "Volvo Torslanda PVH", "label": "Volvo Torslanda", "stopNamePattern": "^Volvo Torslanda PVH$", "lat": 57.728, "lon": 11.86608, "radius": 150 },
     { "key": "frolunda-torg", "name": "Frölunda Torg", "label": "Frölunda Torg", "stopNamePattern": "^Frölunda Torg$", "lat": 57.65221, "lon": 11.90979, "radius": 150 },
-    { "key": "landvetter", "name": "Landvetter flygplats", "label": "Landvetter flygplats", "stopNamePattern": "^Landvetter flygplats$", "lat": 57.66755, "lon": 12.29557, "radius": 150 }
+    { "key": "landvetter", "name": "Landvetter flygplats", "label": "Landvetter flygplats", "stopNamePattern": "^Landvetter flygplats$", "lat": 57.66755, "lon": 12.29557, "radius": 150 },
+    { "key": "volvo-lundby", "name": "Volvo Lundby Norra", "label": "Volvo Lundby", "stopNamePattern": "^Volvo Lundby Norra$", "lat": 57.71694, "lon": 11.92139, "radius": 150 },
+    { "key": "eriksberg", "name": "Eriksbergstorget", "label": "Eriksberg", "stopNamePattern": "^Eriksbergstorget$", "lat": 57.70235, "lon": 11.91323, "radius": 150 },
+    { "key": "hjalmar", "name": "Hjalmar Brantingsplatsen", "label": "Hjalmar Brantingsplatsen", "stopNamePattern": "^Hjalmar Brantingsplatsen$", "lat": 57.72083, "lon": 11.95366, "radius": 150 },
+    { "key": "linneplatsen", "name": "Linnéplatsen", "label": "Linnéplatsen", "stopNamePattern": "^Linnéplatsen$", "lat": 57.68997, "lon": 11.95226, "radius": 150 },
+    { "key": "arendal", "name": "Arendal Terminal", "label": "Arendal", "stopNamePattern": "^Arendal Terminal$", "lat": 57.70006, "lon": 11.80979, "radius": 150 },
+    { "key": "amhult", "name": "Amhult Resecentrum", "label": "Amhult (Torslanda)", "stopNamePattern": "^Amhult Resecentrum$", "lat": 57.70956, "lon": 11.78017, "radius": 150 }
   ],
   "spotCheck": [
     "Mölndal station", "Lindome station", "Kungsbacka station", "Partille station", "Lerum station", "Alingsås station", "Kungälv resecentrum", "Backa Kyrkogata", "Frölunda Torg", "Angered Centrum"

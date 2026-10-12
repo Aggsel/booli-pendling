@@ -154,7 +154,9 @@ function footpaths(stops, used, transfers) {
 // The destination's stops: by name, or else every stop within `radius` metres of its coordinates.
 function destinationStops(stops, d, log) {
   const re = new RegExp(d.stopNamePattern.normalize('NFC'), 'i');
-  let matched = stops.map((s, i) => i).filter((i) => re.test(stops[i].name));
+  // Stop names repeat across the region ("Hagen", "Kärra"), so with coordinates a name only counts nearby.
+  const near = (i) => d.lat == null || metres(d, stops[i]) <= Math.max(d.radius || 0, 1000);
+  let matched = stops.map((s, i) => i).filter((i) => re.test(stops[i].name) && near(i));
   if (!matched.length && d.lat != null) {
     const near = stops.map((s, i) => [i, metres(d, s)]).sort((a, b) => a[1] - b[1]);
     matched = near.filter(([, m]) => m <= (d.radius || 200)).map(([i]) => i);

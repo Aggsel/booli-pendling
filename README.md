@@ -6,7 +6,7 @@ Se restiden till jobbet direkt på Booli. Skriptet lägger till **Pendling** och
 - Sista resan hem på kvällen
 - Närmaste matbutik, skola och förskola, och körtid i rusning
 - Fungerar i hela Sverige
-- I sökresultaten: ungefärlig restid för varje bostad till ett av tolv resmål (Göteborg C, Lindholmen, Gamlestaden, Chalmers, Sahlgrenska, Östra sjukhuset, Korsvägen, Mölndal, AstraZeneca Mölndal, Volvo Torslanda, Frölunda Torg och Landvetter flygplats) eller till dina egna, filter på längsta restid och sortering efter pendling. Det fungerar utan nyckel och gör inga anrop till Trafiklab.
+- I sökresultaten: ungefärlig restid för varje bostad till ett av arton resmål (Göteborg C, Lindholmen, Gamlestaden, Chalmers, Sahlgrenska, Östra sjukhuset, Korsvägen, Mölndal, AstraZeneca Mölndal, Volvo Torslanda, Frölunda Torg, Landvetter flygplats, Volvo Lundby, Eriksberg, Hjalmar Brantingsplatsen, Linnéplatsen, Arendal och Amhult) eller till dina egna, filter på längsta restid och sortering efter pendling. Det fungerar utan nyckel och gör inga anrop till Trafiklab.
 
 ## Installera
 
