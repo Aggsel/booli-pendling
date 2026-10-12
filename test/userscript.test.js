@@ -462,6 +462,42 @@ test('zoomed out, a small pocket within the limit near a stop is not lost in a b
   assert.equal(shaded(feats, { lat: 57.6205, lon: 11.9 }), true, '6 km away is over');
 });
 
+test('the shading stays inside Booli\'s search area, under Booli\'s own area layers, in violet', async () => {
+  const sources = new Map(), layers = [];
+  // The search area: a rectangle with a hole (an excluded district), as Booli's polygonSource.
+  const area = { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [
+    [[11.9, 57.5], [12.1, 57.5], [12.1, 57.62], [11.9, 57.62], [11.9, 57.5]],
+    [[11.97, 57.53], [12.03, 57.53], [12.03, 57.57], [11.97, 57.57], [11.97, 57.53]],
+  ] } }] };
+  const before = (w) => {
+    const el = w.document.getElementById('map');
+    const fake = {
+      getContainer: () => el,
+      getStyle: () => ({ sources: { polygonSource: { type: 'geojson' }, maskSource: { type: 'geojson' } },
+        layers: [{ id: 'booli-mask', type: 'fill', source: 'maskSource' }, { id: 'booli-outline', type: 'line', source: 'polygonSource' }] }),
+      querySourceFeatures: () => [], getPaintProperty: () => 1, setPaintProperty: () => {}, on: () => {},
+      getLayer: (id) => (['booli-mask', 'booli-outline'].includes(id) || layers.some((l) => l.id === id) ? {} : undefined),
+      getBounds: () => ({ toArray: () => [[11.8, 57.45], [12.2, 57.68]] }), getZoom: () => 11,
+      // Like newer MapLibre: serialize() doesn't carry the data, getData() does.
+      getSource: (id) => (id === 'polygonSource' ? { serialize: () => ({ type: 'geojson', data: {} }), getData: async () => area } : sources.get(id)),
+      addSource: (id, src) => sources.set(id, { data: src.data, setData(d) { this.data = d; } }),
+      addLayer: (layer, beforeId) => layers.push({ ...layer, beforeId }), removeLayer: () => {}, removeSource: () => {},
+    };
+    el.__reactFiber$test = { stateNode: el, memoizedProps: { map: fake }, memoizedState: null, return: null };
+  };
+  const store = { ...STORE, config: { list: { dest: 'mine', max: 20, over: 'dim', sort: false } } };
+  load({ url: 'https://www.booli.se/sok/till-salu', body: '<div class="maplibregl-map" id="map"></div>', store, before });
+  await sleep(1100); // the area arrives from getData() after the first drawing; the map is redrawn with it
+  const feats = sources.get('bcs-commute-shade').data.features;
+  const fill = layers.find((l) => l.id === 'bcs-commute-shade');
+  assert.equal(fill.beforeId, 'booli-mask', 'under Booli\'s grey and outline');
+  assert.equal(fill.paint['fill-color'], '#5b3a9e');
+  // Everything here is far over 20 min except next to Snabb buss (57.65, 12.04), which is outside the area anyway.
+  assert.equal(shaded(feats, { lat: 57.6, lon: 12.06 }), true, 'inside the area and over the limit: violet');
+  assert.equal(shaded(feats, { lat: 57.47, lon: 11.85 }), false, 'outside the area: Booli\'s grey only');
+  assert.equal(shaded(feats, { lat: 57.55, lon: 12.0 }), false, 'in the hole: outside the area');
+});
+
 test('listings without a position stay visible and say "pendling okänd"', async () => {
   const body = `<main><ul id="list">${card({ id: 999001 })}${card({ id: 999002 })}</ul></main>`;
   const { w, close } = load({ url: 'https://www.booli.se/sok/till-salu', body, store: {
