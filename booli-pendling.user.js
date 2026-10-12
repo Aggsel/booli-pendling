@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.11.0
+// @version      1.11.1
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -43,6 +43,7 @@
   const TABLES = [{ key: 'gbg-c', label: 'Göteborg C', name: 'Göteborg Centralstation', lat: 57.7089, lon: 11.9735 }];
   const TABLE_TTL = 7 * 24 * 3600 * 1000;
   const INDEX_TTL = 6 * 3600 * 1000; // the index is small: check often, so new destinations and tables show up soon
+  const SCRIPT_VERSION = typeof GM_info !== 'undefined' && GM_info.script ? GM_info.script.version : '';
   const TABLE_STALE_DAYS = 21;
   const LIST_MAXES = [20, 30, 40, 50, 60];
 
@@ -710,7 +711,8 @@
       const stored = GM_getValue(`table:${name}`, null);
       const v = stored ? parseRemote(name, stored.data) : null;
       tableMem.set(name, v);
-      const oldIndex = name === 'index' && v && !v.every((m) => m.generated); // from before the index had build times
+      // An index saved by an earlier version of the script is fetched again: new features often need new fields.
+      const oldIndex = name === 'index' && v && (stored.v !== SCRIPT_VERSION || !v.every((m) => m.generated));
       if (!v || oldIndex || Date.now() - stored.t > (name === 'index' ? INDEX_TTL : TABLE_TTL)) refreshTable(name);
     }
     const v = tableMem.get(name);
@@ -727,7 +729,7 @@
       tableJobs.set(name, gmJson(TABLE_BASE + remoteFile(name)).then((data) => {
         const v = parseRemote(name, data);
         if (!v) throw new Error('Okänd tabell');
-        GM_setValue(`table:${name}`, { t: Date.now(), data });
+        GM_setValue(`table:${name}`, { t: Date.now(), v: SCRIPT_VERSION, data });
         tableMem.set(name, v);
         onTableLoaded();
         return v;

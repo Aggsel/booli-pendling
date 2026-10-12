@@ -36,7 +36,7 @@ const TABLE = {
 };
 const P = { lat: 57.65, lon: 12.0 };
 const meta = (t) => ({ ...t.destination, label: t.destination.label || 'Göteborg C', generated: t.generated });
-const INDEX = (...tables) => ({ t: Date.now(), data: { version: 1, tables: tables.map(meta) } });
+const INDEX = (...tables) => ({ t: Date.now(), v: '9.9.9', data: { version: 1, tables: tables.map(meta) } });
 // A second destination at Lindholmen, with every stop 10 min further away.
 const LINDHOLMEN = { ...TABLE, destination: { key: 'lindholmen', name: 'Lindholmen', label: 'Lindholmen', lat: 57.70675, lon: 11.93835 },
   stops: TABLE.stops.map((r) => [r[0], r[1], r[2] + 10, ...r.slice(3)]) };
@@ -53,6 +53,7 @@ function load({ url = 'https://www.booli.se/', body = '', store = {}, before } =
   const menu = {};
   w.GM_registerMenuCommand = (name, fn) => { menu[name] = fn; };
   w.GM_setClipboard = () => {};
+  w.GM_info = { script: { version: '9.9.9' } };
   w.fetch = async (u) => { requests.push(String(u)); return { text: async () => '' }; };
   w.__BCS_TEST__ = {};
   if (before) before(w);
@@ -182,7 +183,7 @@ function carTableFixture() {
 
 test('by car: Färdsätt appears once driving times exist, and Bil switches every card to them', () => {
   const CAR = carTableFixture();
-  const carIndex = { t: Date.now(), data: { version: 1, tables: [{ ...meta(TABLE), carGenerated: CAR.generated }] } };
+  const carIndex = { t: Date.now(), v: '9.9.9', data: { version: 1, tables: [{ ...meta(TABLE), carGenerated: CAR.generated }] } };
   const plain = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml, store: STORE });
   assert.equal(plain.w.document.querySelector('[data-f="mode"]').closest('label').hidden, true, 'no driving times yet');
 
@@ -203,7 +204,7 @@ test('by car: Färdsätt appears once driving times exist, and Bil switches ever
 
 test('by car: a house with no road nearby says "körtid okänd", and the map shades from the car minutes', async () => {
   const CAR = carTableFixture();
-  const carIndex = { t: Date.now(), data: { version: 1, tables: [{ ...meta(TABLE), carGenerated: CAR.generated }] } };
+  const carIndex = { t: Date.now(), v: '9.9.9', data: { version: 1, tables: [{ ...meta(TABLE), carGenerated: CAR.generated }] } };
   const sources = new Map();
   let workers = 0;
   const before = (w) => {
@@ -549,6 +550,11 @@ test('an index older than 6 hours is fetched again, and so is a table the index 
     'table:index': { t: old, data: { version: 1, tables: [rebuilt] } }, 'table:gbg-c': { t: Date.now(), data: TABLE } } });
   assert.ok(requests.includes('https://raw.githubusercontent.com/Aggsel/booli-pendling/main/data/tables.json'));
   assert.ok(requests.includes('https://raw.githubusercontent.com/Aggsel/booli-pendling/main/data/travel-times-gbg-c.json'));
+});
+
+test('an index saved by an earlier version of the script is fetched again at once', () => {
+  const { requests } = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml, store: { ...STORE, 'table:index': { ...INDEX(TABLE), v: '1.11.0' } } });
+  assert.ok(requests.includes('https://raw.githubusercontent.com/Aggsel/booli-pendling/main/data/tables.json'));
 });
 
 test('the table is fetched on first use when nothing is stored', async () => {
