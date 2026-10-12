@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.9.0
+// @version      1.9.1
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -2114,7 +2114,7 @@
   // The map is checked a moment after it settles, never on every frame. The dot layer is found once; after that
   // each check only reads that layer's ids and positions, and every house's result is remembered.
   let mapSig = '';
-  let mapHooked = null;
+  let mapHooked = null; // the container of the map the idle listener is attached to
   let mapTimer = null;
   let dotSetup = null; // { source, sourceLayer, idKey, layers }
   const mapOriginals = new Map();
@@ -2141,8 +2141,12 @@
     let map;
     try { map = findMap(); } catch { return; }
     if (!map) return;
-    if (mapHooked !== map) { // the map redraws without touching the page: check again once it settles
-      mapHooked = map;
+    // The map redraws without touching the page: check again once it settles. One listener per map container,
+    // even if the map is reached through a different wrapper object next time.
+    let container = null;
+    try { container = map.getContainer(); } catch {}
+    if (mapHooked !== container) {
+      mapHooked = container;
       dotSetup = null;
       mapSig = '';
       shadeSig = '';
@@ -2190,39 +2194,66 @@
 
   // ---------- shading the areas over the limit ----------
   // Grouped dots can't be dimmed one by one, so the map itself is shaded: a grid over the visible area, each cell
-  // estimated like a house, cells over the limit (or with no stop within reach) drawn grey under the dots.
-  // Cells next to each other in a row become one rectangle, so the layer stays small.
+  // estimated like a house, cells over the limit (or with no stop within reach) drawn light grey under the dots,
+  // and a dark line along the edge of the area within the limit, so it stands apart from Booli's own grey mask.
+  // Cells have fixed sizes (125 m, 250 m, 500 m …) on fixed lines, so they stay put as you pan and zoom.
   const SHADE_ID = 'bcs-commute-shade';
-  const SHADE_PX = 26; // cell size on screen
-  const SHADE_MAX_CELLS = 12000;
+  const SHADE_PX = 24; // smallest cell size on screen
+  const SHADE_REF_LAT = 57.7; // fixed east-west spacing for the grid
   let shadeSig = '';
-  const shadeMemo = new Map(); // grid cell → over the limit? Cells sit on fixed lines, so panning reuses them.
+  const shadeMemo = new Map(); // grid cell → over the limit? Reused across panning and zooming.
   let shadeMemoKey = '';
 
   function shadeCells(bounds, zoom, test) {
     const [[w0, s0], [e0, n0]] = bounds;
-    const midLat = (s0 + n0) / 2;
-    const mPerPx = (156543.03 * Math.cos((midLat * Math.PI) / 180)) / 2 ** zoom;
-    let cell = clamp(SHADE_PX * mPerPx, 120, 3000);
-    const kmLon = KM_LAT * Math.cos((midLat * Math.PI) / 180);
+    const mPerPx = (156543.03 * Math.cos((SHADE_REF_LAT * Math.PI) / 180)) / 2 ** zoom;
+    let cell = 125;
+    while (cell / mPerPx < SHADE_PX && cell < 8000) cell *= 2;
+    const kmLon = KM_LAT * Math.cos((SHADE_REF_LAT * Math.PI) / 180);
     // A margin around the view, so panning a little doesn't show an unshaded edge.
     const padLat = (n0 - s0) * 0.15, padLon = (e0 - w0) * 0.15;
     const [w, s, e, n] = [w0 - padLon, s0 - padLat, e0 + padLon, n0 + padLat];
-    while (((n - s) * KM_LAT * 1000 / cell) * ((e - w) * kmLon * 1000 / cell) > SHADE_MAX_CELLS) cell *= 1.4;
+    const cellsFor = (m) => ((n - s) * KM_LAT * 1000 / m) * ((e - w) * kmLon * 1000 / m);
+    while (cellsFor(cell) > 12000 && cell < 8000) cell *= 2;
     const dLat = cell / (KM_LAT * 1000), dLon = cell / (kmLon * 1000);
-    // Snap the grid to fixed lines, so cells don't shift as the view moves.
-    const lat0 = Math.floor(s / dLat) * dLat, lon0 = Math.floor(w / dLon) * dLon;
+    const i0 = Math.floor(s / dLat), i1 = Math.ceil(n / dLat), j0 = Math.floor(w / dLon), j1 = Math.ceil(e / dLon);
+    const over = [];
+    for (let i = i0; i < i1; i++) {
+      const row = [];
+      for (let j = j0; j < j1; j++) row.push(test({ lat: (i + 0.5) * dLat, lon: (j + 0.5) * dLon }, `${cell}:${i}:${j}`));
+      over.push(row);
+    }
+    const at = (i, j) => over[i - i0] && over[i - i0][j - j0];
+    const inGrid = (i, j) => i >= i0 && i < i1 && j >= j0 && j < j1;
     const features = [];
-    for (let lat = lat0; lat < n; lat += dLat) {
-      let runStart = null;
-      for (let lon = lon0; lon < e + dLon; lon += dLon) {
-        const over = lon < e && test({ lat: lat + dLat / 2, lon: lon + dLon / 2 }, `${Math.round(cell)}:${Math.round(lat / dLat)}:${Math.round(lon / dLon)}`);
-        if (over && runStart == null) runStart = lon;
-        if (!over && runStart != null) {
-          features.push({ type: 'Feature', properties: {}, geometry: { type: 'Polygon',
-            coordinates: [[[runStart, lat], [lon, lat], [lon, lat + dLat], [runStart, lat + dLat], [runStart, lat]]] } });
-          runStart = null;
+    const line = (a, b) => features.push({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [a, b] } });
+    for (let i = i0; i < i1; i++) {
+      let run = null;
+      for (let j = j0; j <= j1; j++) {
+        const o = j < j1 && at(i, j);
+        if (o && run == null) run = j;
+        if (!o && run != null) {
+          const [x0, x1, y0, y1] = [run * dLon, j * dLon, i * dLat, (i + 1) * dLat];
+          features.push({ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [[[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]] } });
+          run = null;
         }
+      }
+    }
+    // The edge between cells over and within the limit, merged into long straight pieces.
+    for (let i = i0; i <= i1; i++) { // horizontal edges, below row i
+      let run = null;
+      for (let j = j0; j <= j1; j++) {
+        const edge = j < j1 && inGrid(i - 1, j) && inGrid(i, j) && at(i - 1, j) !== at(i, j);
+        if (edge && run == null) run = j;
+        if (!edge && run != null) { line([run * dLon, i * dLat], [j * dLon, i * dLat]); run = null; }
+      }
+    }
+    for (let j = j0; j <= j1; j++) { // vertical edges, left of column j
+      let run = null;
+      for (let i = i0; i <= i1; i++) {
+        const edge = i < i1 && inGrid(i, j - 1) && inGrid(i, j) && at(i, j - 1) !== at(i, j);
+        if (edge && run == null) run = i;
+        if (!edge && run != null) { line([j * dLon, run * dLat], [j * dLon, i * dLat]); run = null; }
       }
     }
     return { type: 'FeatureCollection', features };
@@ -2231,7 +2262,7 @@
   function shadeMap(map, c, ts, max) {
     const on = ts.length && max;
     if (!on) {
-      if (map.getLayer(SHADE_ID)) map.removeLayer(SHADE_ID);
+      for (const id of [`${SHADE_ID}-edge`, SHADE_ID]) if (map.getLayer(id)) map.removeLayer(id);
       if (map.getSource(SHADE_ID)) map.removeSource(SHADE_ID);
       shadeSig = '';
       return;
@@ -2240,7 +2271,7 @@
     const zoom = map.getZoom();
     const r = (v) => v.toFixed(3);
     const memoKey = `${settingsSig(c)}|${max}|${ts.map((x) => `${x.meta.key}:${x.t.data.generated}`).join(',')}`;
-    const sig = `${b.flat().map(r).join(',')}|${zoom.toFixed(1)}|${c.list.over}|${memoKey}`;
+    const sig = `${b.flat().map(r).join(',')}|${Math.round(zoom * 2)}|${c.list.over}|${memoKey}`;
     if (sig === shadeSig && map.getLayer(SHADE_ID)) return;
     shadeSig = sig;
     if (memoKey !== shadeMemoKey || shadeMemo.size > 200000) { shadeMemoKey = memoKey; shadeMemo.clear(); }
@@ -2256,12 +2287,16 @@
     const src = map.getSource(SHADE_ID);
     if (src) src.setData(toPage(data));
     else map.addSource(SHADE_ID, toPage({ type: 'geojson', data }));
-    const opacity = c.list.over === 'hide' ? 0.4 : 0.2;
+    const opacity = c.list.over === 'hide' ? 0.3 : 0.14;
+    const below = dotSetup && dotSetup.layers[0] && map.getLayer(dotSetup.layers[0].id) ? dotSetup.layers[0].id : undefined;
     if (!map.getLayer(SHADE_ID)) {
-      const below = dotSetup && dotSetup.layers[0] && map.getLayer(dotSetup.layers[0].id) ? dotSetup.layers[0].id : undefined;
-      map.addLayer(toPage({ id: SHADE_ID, type: 'fill', source: SHADE_ID,
+      map.addLayer(toPage({ id: SHADE_ID, type: 'fill', source: SHADE_ID, filter: ['==', ['geometry-type'], 'Polygon'],
         paint: { 'fill-color': '#1b1b1b', 'fill-opacity': opacity, 'fill-antialias': false } }), below);
     } else map.setPaintProperty(SHADE_ID, 'fill-opacity', opacity);
+    if (!map.getLayer(`${SHADE_ID}-edge`)) {
+      map.addLayer(toPage({ id: `${SHADE_ID}-edge`, type: 'line', source: SHADE_ID, filter: ['==', ['geometry-type'], 'LineString'],
+        layout: { 'line-cap': 'square' }, paint: { 'line-color': '#1b1b1b', 'line-opacity': 0.7, 'line-width': 2 } }), below);
+    }
   }
 
   // Without a table for your destination, each card gets a small "Visa pendling" button, so nothing is fetched

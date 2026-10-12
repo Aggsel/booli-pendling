@@ -231,21 +231,23 @@ test('map dots in vector tiles (like Booli\'s listingSource) are dimmed by featu
 
 test('areas over the limit are shaded under the dots, so grouped dots are covered too', async () => {
   const sources = new Map(), layers = [];
+  let view = [[11.85, 57.5], [12.15, 57.72]], fake;
   const before = (w) => {
     const el = w.document.getElementById('map');
-    const fake = {
+    fake = {
       getContainer: () => el,
       getStyle: () => ({ sources: { listingSource: { type: 'vector' } }, layers: [{ id: 'listing-dots', type: 'circle', source: 'listingSource', 'source-layer': 'l' }] }),
       querySourceFeatures: () => listings.map((l) => ({ id: l.id, geometry: { type: 'Point', coordinates: [l.lon, l.lat] }, properties: {} })),
       getPaintProperty: () => 1, setPaintProperty: () => {}, on: () => {},
       getLayer: (id) => (id === 'listing-dots' || layers.some((l) => l.id === id) ? {} : undefined),
-      getBounds: () => ({ toArray: () => [[11.85, 57.5], [12.15, 57.72]] }),
+      getBounds: () => ({ toArray: () => view }),
       getZoom: () => 11,
       getSource: (id) => sources.get(id),
       addSource: (id, src) => sources.set(id, { data: src.data, setData(d) { this.data = d; } }),
       addLayer: (layer, beforeId) => layers.push({ ...layer, beforeId }),
       removeLayer: () => {}, removeSource: () => {},
     };
+    fake = { ...fake, idleCount: 0, on: (ev, fn) => { if (ev === 'idle') { fake.idle = fn; fake.idleCount++; } } };
     el.__reactFiber$test = { stateNode: el, memoizedProps: { map: fake }, memoizedState: null, return: null };
   };
   const store = { ...STORE, config: { list: { dest: 'mine', max: 30, over: 'dim', sort: false } } };
@@ -254,7 +256,11 @@ test('areas over the limit are shaded under the dots, so grouped dots are covere
   const shade = layers.find((l) => l.id === 'bcs-commute-shade');
   assert.equal(shade.type, 'fill');
   assert.equal(shade.beforeId, 'listing-dots'); // under the dots
-  const inside = (p) => sources.get('bcs-commute-shade').data.features.some((f) => {
+  assert.equal(layers.find((l) => l.id === 'bcs-commute-shade-edge').type, 'line'); // the limit's edge
+  const feats = () => sources.get('bcs-commute-shade').data.features;
+  const boxes = () => feats().filter((f) => f.geometry.type === 'Polygon');
+  assert.ok(feats().some((f) => f.geometry.type === 'LineString'));
+  const inside = (p) => boxes().some((f) => {
     const [[w, s], [e,, ], [, n]] = f.geometry.coordinates[0];
     return p.lon >= w && p.lon <= e && p.lat >= s && p.lat <= n;
   });
@@ -264,6 +270,17 @@ test('areas over the limit are shaded under the dots, so grouped dots are covere
   assert.ok(api.estimate(near, c, t).mins < 25 && api.estimate(far, c, t).mins > 35);
   assert.equal(inside(near), false);
   assert.equal(inside(far), true);
+
+  // Panning keeps the cells on the same lines: every corner stays on the first view's grid.
+  const corners = () => boxes().flatMap((f) => f.geometry.coordinates[0]);
+  const xs = [...new Set(corners().map(([x]) => x))].sort((a, b) => a - b);
+  const step = Math.min(...xs.slice(1).map((x, i) => x - xs[i]));
+  view = [[11.873, 57.513], [12.173, 57.733]];
+  fake.idle();
+  await sleep(500);
+  assert.ok(corners().every(([x]) => Math.abs(x / step - Math.round(x / step)) < 1e-6), 'cells stay on the same grid lines');
+  assert.equal(inside(far), true);
+  assert.equal(fake.idleCount, 1, 'one idle listener, however often the map is checked');
 });
 
 test('listings without a position stay visible and say "pendling okänd"', async () => {
