@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.7.0
+// @version      1.7.1
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -1977,27 +1977,52 @@
     return null;
   }
 
-  // The listings' dots: a GeoJSON source with one point per listing, an id property, and the layers that draw it.
+  // Page objects copied into plain data, so Firefox lets the script work with them.
+  const plain = (v) => JSON.parse(JSON.stringify(v ?? null));
+  const ID_EXPR = '$id'; // the vector-tile feature id rather than a property
+
+  // Features of a source: GeoJSON, or vector tiles (which need the layer inside the tile).
+  function sourceFeatures(map, name, sourceLayer) {
+    try { return plain(sourceLayer ? map.querySourceFeatures(name, toPage({ sourceLayer })) : map.querySourceFeatures(name)) || []; } catch { return []; }
+  }
+
+  // The listings' dots: the source whose points carry the listing ids, and the layers that draw them.
+  // The id field is the one whose values match the listing ids on the page, else a likely name.
   function mapListings(map) {
-    const style = map.getStyle();
-    for (const [name, src] of Object.entries(style.sources || {})) {
-      if (src.type !== 'geojson') continue;
-      let feats;
-      try { feats = [...map.querySourceFeatures(name)]; } catch { continue; }
-      const points = feats.filter((f) => f.geometry && f.geometry.type === 'Point' && !(f.properties || {}).point_count);
+    const style = plain(map.getStyle());
+    const known = new Set([...listPos.keys(), ...findListCards().map((x) => x.id)]);
+    const groups = new Map(); // "source|source-layer" → layers
+    for (const l of style.layers || []) {
+      const src = style.sources[l.source];
+      if (!src || !MAP_OPACITY[l.type] || (src.type !== 'geojson' && src.type !== 'vector')) continue;
+      const k = `${l.source}|${l['source-layer'] || ''}`;
+      (groups.get(k) || groups.set(k, []).get(k)).push(l);
+    }
+    let best = null;
+    for (const [k, layers] of groups) {
+      const [name, sourceLayer] = k.split('|');
+      const points = sourceFeatures(map, name, sourceLayer).filter((f) => f.geometry && f.geometry.type === 'Point'
+        && !(f.properties || {}).point_count && !(f.properties || {}).cluster);
       if (!points.length) continue;
-      const props = points[0].properties || {};
-      const idProp = MAP_ID_KEYS.find((k) => k in props) || Object.keys(props).find((k) => /^\d{5,9}$/.test(String(props[k])));
-      const layers = style.layers.filter((l) => l.source === name && MAP_OPACITY[l.type]);
-      if (!idProp || !layers.length) continue;
+      const valueOf = (f, key) => String(key === ID_EXPR ? f.id : (f.properties || {})[key]);
+      const keys = [...new Set(points.flatMap((f) => Object.keys(f.properties || {}))), ID_EXPR];
+      const scored = keys.map((key) => ({ key, hits: points.filter((f) => known.has(valueOf(f, key))).length }));
+      let idKey = scored.sort((a, b) => b.hits - a.hits)[0];
+      idKey = idKey && idKey.hits ? idKey.key : null;
+      if (!idKey && /listing/i.test(name)) {
+        idKey = MAP_ID_KEYS.find((x) => keys.includes(x)) || keys.find((x) => points.every((f) => /^\d{5,9}$/.test(valueOf(f, x)))) || null;
+      }
+      if (!idKey) continue;
+      const score = (/listing/i.test(name) ? 1e6 : 0) + points.length;
+      if (best && best.score >= score) continue;
       const byId = new Map();
       for (const f of points) {
-        const id = String(f.properties[idProp]);
+        const id = valueOf(f, idKey);
         if (!byId.has(id)) byId.set(id, { id, lon: +f.geometry.coordinates[0], lat: +f.geometry.coordinates[1] });
       }
-      return { source: name, idProp, layers, dots: [...byId.values()] };
+      best = { score, source: name, sourceLayer, idKey, layers, dots: [...byId.values()] };
     }
-    return null;
+    return best;
   }
 
   let mapSig = '';
@@ -2020,16 +2045,17 @@
         const es = ts.map((x) => estimate(p, c, x.t));
         return es.every(Boolean) && Math.max(...es.map((e) => e.mins)) > max;
       }).map((p) => p.id);
-      const sig = `${info.source}|${c.list.over}|${over.join(',')}`;
+      const sig = `${info.source}|${info.idKey}|${c.list.over}|${over.join(',')}`;
       if (sig === mapSig) return;
       mapSig = sig;
       const to = c.list.over === 'hide' ? 0 : 0.25;
       for (const layer of info.layers) for (const prop of MAP_OPACITY[layer.type]) {
         const k = `${layer.id}|${prop}`;
-        if (!mapOriginals.has(k)) { const v = map.getPaintProperty(layer.id, prop); mapOriginals.set(k, v === undefined ? null : v); }
+        if (!mapOriginals.has(k)) mapOriginals.set(k, plain(map.getPaintProperty(layer.id, prop)));
         const orig = mapOriginals.get(k);
+        const idOf = info.idKey === ID_EXPR ? ['id'] : ['get', info.idKey];
         const value = over.length
-          ? ['case', ['in', ['to-string', ['get', info.idProp]], ['literal', over]], to, typeof orig === 'number' ? orig : 1]
+          ? ['case', ['in', ['to-string', idOf], ['literal', over]], to, typeof orig === 'number' ? orig : 1]
           : orig;
         map.setPaintProperty(layer.id, prop, toPage(value));
       }
@@ -2922,16 +2948,19 @@
       const map = findMap();
       debug.mapInstance = !!map;
       if (map) {
-        const style = map.getStyle();
-        debug.sources = Object.entries(style.sources || {}).map(([k, v]) => ({ name: k, type: v.type, cluster: v.cluster || false }));
-        debug.layers = style.layers.filter((l) => style.sources[l.source] && style.sources[l.source].type === 'geojson')
-          .map((l) => ({ id: l.id, type: l.type, source: l.source, filter: l.filter || null }));
-        const info = mapListings(map);
-        debug.dots = info ? { source: info.source, idProp: info.idProp, layers: info.layers.map((l) => l.id), count: info.dots.length, sample: info.dots.slice(0, 3) } : null;
-        debug.sampleFeatures = debug.sources.filter((x) => x.type === 'geojson').map((x) => {
-          const f = [...map.querySourceFeatures(x.name)][0];
-          return f ? { source: x.name, geometry: f.geometry && f.geometry.type, properties: JSON.parse(JSON.stringify(f.properties || {})) } : { source: x.name, none: true };
+        const style = plain(map.getStyle());
+        debug.sources = Object.entries(style.sources || {}).map(([k, v]) => ({ name: k, type: v.type }));
+        debug.layers = (style.layers || []).filter((l) => style.sources[l.source] && /listing|project/i.test(l.source))
+          .map((l) => ({ id: l.id, type: l.type, source: l.source, sourceLayer: l['source-layer'] || null, filter: l.filter || null }));
+        const groups = [...new Set(debug.layers.map((l) => `${l.source}|${l.sourceLayer || ''}`))];
+        debug.sampleFeatures = groups.map((g) => {
+          const [name, sl] = g.split('|');
+          const fs = sourceFeatures(map, name, sl);
+          return { source: name, sourceLayer: sl || null, count: fs.length, sample: fs.slice(0, 2).map((f) => ({ id: f.id, geometry: f.geometry, properties: f.properties })) };
         });
+        const info = mapListings(map);
+        debug.dots = info ? { source: info.source, sourceLayer: info.sourceLayer, idKey: info.idKey, layers: info.layers.map((l) => l.id), count: info.dots.length, sample: info.dots.slice(0, 3) } : null;
+        debug.knownIds = listPos.size;
       }
     } catch (e) { debug.error = String(e && e.message); }
     GM_setClipboard(JSON.stringify(debug, null, 2));

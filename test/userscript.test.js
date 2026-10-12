@@ -194,6 +194,36 @@ test('map dots over the limit are dimmed through the map layer', () => {
   assert.ok(!calls.some(([id]) => id === 'roads'));
 });
 
+test('map dots in vector tiles (like Booli\'s listingSource) are dimmed by feature id', () => {
+  const calls = [];
+  const before = (w) => {
+    const el = w.document.getElementById('map');
+    const fake = {
+      getContainer: () => el,
+      getStyle: () => ({ sources: { protomaps: { type: 'vector' }, listingSource: { type: 'vector' }, projectSource: { type: 'vector' } },
+        layers: [{ id: 'water', type: 'fill', source: 'protomaps', 'source-layer': 'water' },
+          { id: 'listing-dots', type: 'circle', source: 'listingSource', 'source-layer': 'listings' },
+          { id: 'project-dots', type: 'circle', source: 'projectSource', 'source-layer': 'projects' }] }),
+      // Vector tiles only answer with a source layer.
+      querySourceFeatures: (name, o) => (name === 'listingSource' && o && o.sourceLayer === 'listings'
+        ? listings.map((l) => ({ id: l.id, geometry: { type: 'Point', coordinates: [l.lon, l.lat] }, properties: { type: 'villa', status: 1 } }))
+        : name === 'projectSource' && o && o.sourceLayer === 'projects' ? [{ id: 77, geometry: { type: 'Point', coordinates: [12, 57.6] }, properties: {} }] : []),
+      getPaintProperty: () => undefined,
+      setPaintProperty: (...a) => calls.push(a),
+      on: () => {},
+    };
+    el.__reactFiber$test = { stateNode: el, memoizedProps: {}, memoizedState: null,
+      return: { stateNode: null, memoizedProps: { mapRef: { current: fake } }, memoizedState: null, return: null } };
+  };
+  const store = { ...STORE, config: { list: { table: 'auto', max: 40, over: 'hide', sort: false } } };
+  const { api } = load({ url: 'https://www.booli.se/sok/till-salu', body: `<div class="maplibregl-map" id="map"></div>${pageHtml}`, store, before });
+  const t = api.indexTable(TABLE), c = api.cfg();
+  const over = listings.filter((l) => { const e = api.estimate(l, c, t); return e && e.mins > 40; }).map((l) => String(l.id));
+  const opacity = calls.filter(([id, prop]) => id === 'listing-dots' && prop === 'circle-opacity').pop();
+  assert.deepEqual(JSON.parse(JSON.stringify(opacity[2])), ['case', ['in', ['to-string', ['id']], ['literal', over]], 0, 1]);
+  assert.ok(!calls.some(([id]) => id !== 'listing-dots'));
+});
+
 test('listings without a position stay visible and say "pendling okänd"', async () => {
   const body = `<main><ul id="list">${card({ id: 999001 })}${card({ id: 999002 })}</ul></main>`;
   const { w, close } = load({ url: 'https://www.booli.se/sok/till-salu', body, store: {
