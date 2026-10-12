@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.13.1
+// @version      1.13.2
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -2001,8 +2001,10 @@
     if (!tiles.length) return null;
     const roomsSec = childOf(list, leafWith(list, /^Antal rum$/));
     const selects = roomsSec ? [...roomsSec.querySelectorAll('select')] : [];
-    const area = childOf(list, leafWith(list, /^Utöka sökområde$/));
-    return { head, sec, list, tiles, roomsSec, selects, area };
+    // The section goes last: after "Nyproduktion" / "Snart till salu", the panel's last part.
+    const lastLeaf = leafWith(list, /^Snart till salu$/) || leafWith(list, /^Nyproduktion$/);
+    const after = lastLeaf ? childOf(list, lastLeaf) : null;
+    return { head, sec, list, tiles, roomsSec, selects, after };
   }
 
   function buildPanelSection(p) {
@@ -2124,9 +2126,10 @@
     if (!p) return;
     if (!panelSection || !p.list.contains(panelSection)) {
       try { panelSection = buildPanelSection(p); } catch { panelSection = null; return; }
-      // After "Utöka sökområde", else first.
-      if (p.area) p.area.after(panelSection); else p.list.insertBefore(panelSection, p.list.firstElementChild);
     }
+    // Last in the panel: after "Nyproduktion / Snart till salu" (kept there if Booli redraws or adds parts).
+    if (p.after && p.after !== panelSection) { if (p.after.nextElementSibling !== panelSection) p.after.after(panelSection); }
+    else if (p.list.lastElementChild !== panelSection) p.list.appendChild(panelSection);
     const q = (f) => panelSection.querySelector(`select[data-f="${f}"]`);
     const ts = tablesFor(c);
     const opts = destOptions(c);
@@ -3603,7 +3606,7 @@ self.onmessage = (e) => {
       estimates: cards.slice(0, 5).map((x) => ({ id: x.id, pos: knownPos(x.id), text: [...x.line.querySelectorAll('[data-bcs-est]')].map((e) => e.textContent).join(' · ') || null })),
       filterPanel: (() => {
         const p = findFilterPanel();
-        return p ? { tiles: p.tiles.length, selects: p.selects.length, areaSection: !!p.area, inserted: !!document.querySelector('[data-bcs-panel]'),
+        return p ? { tiles: p.tiles.length, selects: p.selects.length, lastSection: !!p.after, inserted: !!document.querySelector('[data-bcs-panel]'),
           typeSectionHtml: p.sec.outerHTML.slice(0, 2500), roomsSectionHtml: p.roomsSec ? p.roomsSec.outerHTML.slice(0, 2500) : null } : 'Sökfilter är inte öppet';
       })(),
       filterBar: (() => {

@@ -273,6 +273,8 @@ const PANEL = `<div id="sokfilter"><h2>Sökfilter</h2><div class="sections">
     <div class="f"><label class="lab">Minst</label><div class="w"><select class="sel" name="minRooms"><option>Visa allt</option></select><svg></svg></div></div>
     <div class="f"><label class="lab">Upp till</label><div class="w"><select class="sel" name="maxRooms"><option>Visa allt</option></select><svg></svg></div></div>
   </div></section>
+  <section class="sec"><div class="cols"><div><h3 class="sec-h">Nyproduktion</h3><label><input type="radio" name="np">Visa allt</label></div>
+    <div><h3 class="sec-h">Snart till salu</h3><label><input type="radio" name="sts">Visa allt</label></div></div></section>
 </div></div>`;
 // Like the real panel: the Bostadstyp heading and its tiles share one wrapper inside the section.
 const PANEL_WRAPPED = PANEL.replace('<section class="sec"><h3 class="sec-h">Bostadstyp</h3><div class="tiles">', '<section class="sec"><div class="stack"><h3 class="sec-h">Bostadstyp</h3><div class="tiles">')
@@ -551,11 +553,12 @@ test('choosing a destination in Sökfilter switches every card to that table', (
   assert.equal(doc.querySelectorAll('[data-bcs-est$=":gbg-c"]').length, 0);
 });
 
-test('the controls are a section in Booli\'s Sökfilter panel, built from its own parts', () => {
+test('the controls are a section in Booli\'s Sökfilter panel, built from its own parts', async () => {
   const { w, values } = load({ url: 'https://www.booli.se/sok/till-salu', body: PANEL + pageHtml, store: STORE });
   const doc = w.document, section = doc.querySelector('[data-bcs-panel]');
-  // After "Utöka sökområde", with Booli's own classes.
-  assert.equal(section.previousElementSibling.querySelector('h3').textContent, 'Utöka sökområde');
+  // Last, after "Nyproduktion / Snart till salu", with Booli's own classes.
+  assert.match(section.previousElementSibling.textContent, /Nyproduktion[\s\S]*Snart till salu/);
+  assert.equal(section.nextElementSibling, null);
   assert.equal(section.className, 'sec');
   assert.equal(section.querySelector('h3.sec-h').textContent, 'Pendling');
   const labels = [...section.querySelectorAll('label.lab')].map((l) => l.textContent);
@@ -570,6 +573,13 @@ test('the controls are a section in Booli\'s Sökfilter panel, built from its ow
   assert.equal(values.get('config').list.sort, true);
   assert.equal(ctl(doc, 'sort').className, 'tile tile-on');
   assert.equal(ctl(doc, 'sort').getAttribute('aria-pressed'), 'true');
+  // Booli redraws and adds a part at the end: the section moves back after Snart till salu.
+  const extra = doc.createElement('section');
+  extra.className = 'sec';
+  extra.textContent = 'Något nytt';
+  doc.querySelector('.sections').appendChild(extra);
+  await sleep(400);
+  assert.match(doc.querySelector('[data-bcs-panel]').previousElementSibling.textContent, /Snart till salu/);
   // Booli's own parts are untouched.
   assert.equal(doc.querySelectorAll('[data-bcs-panel]').length, 1);
   assert.equal(doc.querySelector('.sec:not([data-bcs-panel]) button.tile-on span').textContent, 'Villa');
