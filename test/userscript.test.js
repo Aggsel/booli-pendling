@@ -167,6 +167,74 @@ test('on the map, the minutes come from the background worker and the shading is
   assert.equal(shaded(feats, { lat: 57.65, lon: 12.035 }), false);
 });
 
+// Driving minutes around the test area: 1.5 min per km to Göteborg C plus 3 to park; west of 11.9 is sea.
+function carTableFixture() {
+  const g = { lat0: 57.45, lon0: 11.7, dLat: 0.009, dLon: 0.0168, rows: 40, cols: 40 };
+  const bytes = new Uint8Array(g.rows * g.cols);
+  for (let r = 0; r < g.rows; r++) for (let c = 0; c < g.cols; c++) {
+    const lat = g.lat0 + r * g.dLat, lon = g.lon0 + c * g.dLon;
+    const km = Math.hypot((lat - 57.7089) * 111.2, (lon - 11.9735) * 59.5);
+    bytes[r * g.cols + c] = lon < 11.9 ? 255 : Math.round(km * 1.5 + 3);
+  }
+  return { version: 1, destination: { ...TABLE.destination, label: 'Göteborg C' }, generated: new Date().toISOString(),
+    source: 'test', rushFactor: 1.3, parkMinutes: 3, grid: g, minutes: Buffer.from(bytes).toString('base64') };
+}
+
+test('by car: Färdsätt appears once driving times exist, and Bil switches every card to them', () => {
+  const CAR = carTableFixture();
+  const carIndex = { t: Date.now(), data: { version: 1, tables: [{ ...meta(TABLE), carGenerated: CAR.generated }] } };
+  const plain = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml, store: STORE });
+  assert.equal(plain.w.document.querySelector('[data-f="mode"]').closest('label').hidden, true, 'no driving times yet');
+
+  const { w, values } = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml,
+    store: { ...STORE, 'table:index': carIndex, 'table:car:gbg-c': { t: Date.now(), data: CAR } } });
+  const doc = w.document, sel = doc.querySelector('[data-f="mode"]');
+  assert.equal(sel.closest('label').hidden, false);
+  sel.value = 'car';
+  sel.dispatchEvent(new w.Event('change', { bubbles: true }));
+  assert.equal(values.get('config').list.mode, 'car');
+  for (const l of listings) {
+    const want = Math.round(Math.hypot((l.lat - 57.7089) * 111.2, (l.lon - 11.9735) * 59.5) * 1.5 + 3);
+    const m = /^ca (\d+) min med bil till Göteborg C$/.exec(est(doc, l.id).textContent.trim());
+    assert.ok(m, est(doc, l.id).textContent);
+    assert.ok(Math.abs(+m[1] - want) <= 1, `${l.id}: ${m[1]} vs ${want}`);
+  }
+});
+
+test('by car: a house with no road nearby says "körtid okänd", and the map shades from the car minutes', async () => {
+  const CAR = carTableFixture();
+  const carIndex = { t: Date.now(), data: { version: 1, tables: [{ ...meta(TABLE), carGenerated: CAR.generated }] } };
+  const sources = new Map();
+  let workers = 0;
+  const before = (w) => {
+    w.Worker = class { constructor() { workers++; } postMessage() {} };
+    const el = w.document.getElementById('map');
+    const fake = {
+      getContainer: () => el, getStyle: () => ({ sources: {}, layers: [] }), querySourceFeatures: () => [],
+      getPaintProperty: () => 1, setPaintProperty: () => {}, on: () => {}, getLayer: () => undefined,
+      getBounds: () => ({ toArray: () => [[11.92, 57.55], [12.15, 57.72]] }), getZoom: () => 11,
+      getSource: (id) => sources.get(id),
+      addSource: (id, src) => sources.set(id, { data: src.data, setData(d) { this.data = d; } }),
+      addLayer: () => {}, removeLayer: () => {}, removeSource: () => {},
+    };
+    el.__reactFiber$test = { stateNode: el, memoizedProps: { map: fake }, memoizedState: null, return: null };
+  };
+  const sea = `<li><a href="/annons/777001"><h3>Ön</h3><div class="facts"><span>90 m²</span><span>3 rum</span><span>500 m² tomt</span></div></a></li>`;
+  const body = `<div class="maplibregl-map" id="map"></div><main><ul id="list">${sea}${listings.map(card).join('')}</ul></main>
+    <script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { r: [{ booliId: 777001, location: { position: { latitude: 57.62, longitude: 11.8 } } },
+      ...listings.map((l) => ({ booliId: l.id, location: { position: { latitude: l.lat, longitude: l.lon } } }))] } })}</script>`;
+  const { w } = load({ url: 'https://www.booli.se/sok/till-salu', body, before,
+    store: { ...STORE, 'table:index': carIndex, 'table:car:gbg-c': { t: Date.now(), data: CAR },
+      config: { list: { dest: 'mine', mode: 'car', max: 20, over: 'dim', sort: false } } } });
+  assert.equal(est(w.document, 777001).textContent.trim(), 'körtid okänd med bil till Göteborg C');
+  await sleep(500);
+  assert.equal(workers, 0, 'driving minutes need no background worker');
+  const feats = sources.get('bcs-commute-shade').data.features;
+  // 20 min by car: 1.5 min/km + 3 → about 11 km from Göteborg C.
+  assert.equal(shaded(feats, { lat: 57.66, lon: 11.99 }), false); // ~5.5 km: within
+  assert.equal(shaded(feats, { lat: 57.57, lon: 12.0 }), true); // ~15.5 km: over
+});
+
 test('estimate() runs in well under 1 ms per listing', () => {
   const { api, close } = load();
   const t = api.indexTable({ ...TABLE, stops: Array.from({ length: 5000 }, (_, i) => [57.3 + (i % 100) / 100, 11.6 + Math.floor(i / 100) / 50, 30, 0, 't', null, `S${i}`]) });

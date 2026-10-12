@@ -6,7 +6,7 @@ Se restiden till jobbet direkt på Booli. Skriptet lägger till **Pendling** och
 - Sista resan hem på kvällen
 - Närmaste matbutik, skola och förskola, och körtid i rusning
 - Fungerar i hela Sverige
-- I sökresultaten: ungefärlig restid för varje bostad till ett av arton resmål (Göteborg C, Lindholmen, Gamlestaden, Chalmers, Sahlgrenska, Östra sjukhuset, Korsvägen, Mölndal, AstraZeneca Mölndal, Volvo Torslanda, Frölunda Torg, Landvetter flygplats, Volvo Lundby, Eriksberg, Hjalmar Brantingsplatsen, Linnéplatsen, Arendal och Amhult) eller till dina egna, filter på längsta restid och sortering efter pendling. Det fungerar utan nyckel och gör inga anrop till Trafiklab.
+- I sökresultaten: ungefärlig restid för varje bostad till ett av arton resmål (Göteborg C, Lindholmen, Gamlestaden, Chalmers, Sahlgrenska, Östra sjukhuset, Korsvägen, Mölndal, AstraZeneca Mölndal, Volvo Torslanda, Frölunda Torg, Landvetter flygplats, Volvo Lundby, Eriksberg, Hjalmar Brantingsplatsen, Linnéplatsen, Arendal och Amhult) eller till dina egna, med kollektivtrafik eller bil, filter på längsta restid, sortering efter pendling och gråmarkering på kartan där restiden är längre. Det fungerar utan nyckel och gör inga anrop till Trafiklab.
 
 ## Installera
 
@@ -32,6 +32,7 @@ Tampermonkey letar efter nya versioner automatiskt och installerar dem. Dina ins
 
 - Kollektivtrafik: [Trafiklab](https://www.trafiklab.se) (ResRobot)
 - Restidstabell: Trafiklab (Samtrafiken), GTFS Regional
+- Körtider i listor och på kartan: © OpenStreetMap-bidragsgivare, beräknade med OSRM. Rusningstrafik är uppskattad (fritt flöde × 1,3 och 3 min att parkera).
 - Gång-, cykel- och bilvägar, butiker, skolor och adresser: © [OpenStreetMap](https://www.openstreetmap.org/copyright)-bidragsgivare
 
 Körtid i rusning är en uppskattning. Närmaste skola betyder inte att ni får plats där.
@@ -42,6 +43,7 @@ Listornas restider kommer från `data/travel-times-<resmål>.json`, en fil per r
 
 - Repot behöver hemligheten `GTFS_KEY` (nyckel för GTFS Regional från Trafiklab). Med `RESROBOT_KEY` jämförs tabellen också med ResRobot i jobbets logg.
 - Fler resmål läggs till i `tools/build-table/config.json`. Alla byggs från samma nedladdning av tidtabellen.
+- Körtiderna byggs en gång i månaden (`.github/workflows/car-times.yml`): vägnätet hämtas från Geofabrik, området runt Göteborg klipps ut och OSRM räknar körtiden från punkter med 1 km mellanrum, 60 km runt Göteborg, till varje resmål.
 - Tester: `npm install` och sedan `npm test`.
 
 ## Något fungerar inte?

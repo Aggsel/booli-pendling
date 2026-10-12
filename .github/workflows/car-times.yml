@@ -1,0 +1,50 @@
+name: Car travel times
+
+on:
+  schedule:
+    - cron: '0 4 2 * *' # the 2nd of every month, 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: travel-times # never at the same time as the transit job, which writes the same index
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Test
+        working-directory: tools/build-table
+        run: npm test
+
+      - name: Road network and OSRM
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq osmium-tool
+          tools/build-table/car-roads.sh /tmp/osm
+
+      - name: Driving times
+        working-directory: tools/build-table
+        run: node car.js
+
+      - name: Commit if changed
+        run: |
+          git add data/
+          if git diff --cached --quiet; then
+            echo "Ingen ändring i körtiderna"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898299+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update car travel times"
+          git pull --rebase
+          git push

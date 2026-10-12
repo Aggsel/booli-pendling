@@ -74,7 +74,12 @@ async function main() {
       if (n === 0 && process.env.RESROBOT_KEY && config.spotCheck) await spotCheck(table, config.spotCheck, process.env.RESROBOT_KEY, log);
     }
     // The index tells the userscript which destinations have a table, and when each was last changed.
-    writeIfChanged(join(outDir, 'tables.json'), { version: 1, tables: written.map((t) => ({ ...t.destination, generated: t.generated })) });
+    // Driving times come from the monthly car job; keep what it recorded.
+    const indexFile = join(outDir, 'tables.json');
+    const oldIndex = existsSync(indexFile) ? JSON.parse(readFileSync(indexFile, 'utf8')) : { tables: [] };
+    const carOf = Object.fromEntries(oldIndex.tables.filter((t) => t.carGenerated).map((t) => [t.key, t.carGenerated]));
+    writeIfChanged(indexFile, { version: 1, tables: written.map((t) => ({ ...t.destination, generated: t.generated,
+      ...(carOf[t.destination.key] ? { carGenerated: carOf[t.destination.key] } : {}) })) });
   } finally {
     if (tmp) rmSync(tmp, { recursive: true, force: true });
   }

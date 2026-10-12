@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.10.0
+// @version      1.11.0
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -145,7 +145,8 @@
     showTodayDelta: true,
     everyday: { grocery: { on: true, mode: 'bike' }, school: { on: true, mode: 'walk' }, car: { on: true } },
     destinations: [{ name: 'Göteborg Centralstation', id: '740000002', lat: 57.708895, lon: 11.973479, ...DEFAULT_DEST }],
-    list: { dest: 'mine', max: 0, over: 'dim', sort: false }, // result lists: 'mine', a table key or 'off'; max minutes (0 = all)
+    list: { dest: 'mine', mode: 'transit', max: 0, over: 'dim', sort: false }, // result lists: 'mine', a table key or 'off';
+    // mode 'transit' or 'car'; max minutes (0 = all)
   };
 
   function cfg() {
@@ -674,8 +675,34 @@
   }
   // The index of published tables: [{ key, name, label, lat, lon }]
   const parseIndex = (data) => (data && data.version === 1 && Array.isArray(data.tables) ? data.tables.filter((t) => t.key && t.lat) : null);
-  const remoteFile = (name) => (name === 'index' ? 'tables.json' : `travel-times-${name}.json`);
-  const parseRemote = (name, data) => (name === 'index' ? parseIndex(data) : indexTable(data));
+  const isCar = (name) => name.startsWith('car:');
+  const remoteFile = (name) => (name === 'index' ? 'tables.json' : isCar(name) ? `car-times-${name.slice(4)}.json` : `travel-times-${name}.json`);
+  const parseRemote = (name, data) => (name === 'index' ? parseIndex(data) : isCar(name) ? indexCar(data) : indexTable(data));
+
+  // Driving times (from the monthly car job): minutes on a grid around Göteborg, one byte per point, 255 = no road.
+  function indexCar(data) {
+    if (!data || data.version !== 1 || !data.grid || typeof data.minutes !== 'string' || !data.destination) return null;
+    const bin = atob(data.minutes);
+    const bytes = new Uint8Array(bin.length);
+    for (let k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k);
+    if (bytes.length !== data.grid.rows * data.grid.cols) return null;
+    const ageDays = Math.floor((Date.now() - new Date(data.generated).getTime()) / 86400000);
+    return { car: true, data, g: data.grid, bytes, dest: data.destination, ageDays, stale: ageDays > 62 };
+  }
+  // Driving minutes at any point: between the four grid points around it, leaving out those with no road nearby.
+  function carMinutesAt(p, t) {
+    const { lat0, lon0, dLat, dLon, rows, cols } = t.g;
+    const y = (p.lat - lat0) / dLat, x = (p.lon - lon0) / dLon;
+    const r = Math.floor(y), q = Math.floor(x), fy = y - r, fx = x - q;
+    let sum = 0, wsum = 0;
+    for (const [a, b, w] of [[r, q, (1 - fy) * (1 - fx)], [r, q + 1, (1 - fy) * fx], [r + 1, q, fy * (1 - fx)], [r + 1, q + 1, fy * fx]]) {
+      if (a < 0 || b < 0 || a >= rows || b >= cols || w <= 0) continue;
+      const v = t.bytes[a * cols + b];
+      if (v === 255) continue;
+      sum += v * w; wsum += w;
+    }
+    return wsum >= 0.25 ? sum / wsum : null; // mostly sea or forest around it: no estimate
+  }
 
   // The stored copy, right away. Fetched on first use and then once a week; a failed fetch keeps the stored copy.
   function tableNow(name) {
@@ -689,8 +716,9 @@
     const v = tableMem.get(name);
     // A table rebuilt since our copy (the index says so) is fetched again right away.
     if (v && name !== 'index' && !tableJobs.has(name)) {
-      const meta = (tableMem.get('index') || []).find((m) => m.key === name);
-      if (meta && meta.generated && meta.generated > v.data.generated) refreshTable(name);
+      const meta = (tableMem.get('index') || []).find((m) => m.key === (isCar(name) ? name.slice(4) : name));
+      const built = meta && (isCar(name) ? meta.carGenerated : meta.generated);
+      if (built && built > v.data.generated) refreshTable(name);
     }
     return v;
   }
@@ -723,20 +751,27 @@
     for (const d of c.destinations) { const m = tableMetaFor(d); if (m && !out.includes(m)) out.push(m); }
     return out;
   };
+  // Driving times exist for some destinations once the car job has run.
+  const hasCar = () => tableIndex().some((m) => m.carGenerated);
+  const carMode = (c) => c.list.mode === 'car' && hasCar();
   // The tables the lists use, as [{ meta, t }]: the destination chosen in the filter bar, or "Mina resmål"
-  // (your resmål with a table, else the first published one). main = true: only your main resmål, for the
-  // placeholder before an exact value. t is the table, or 'loading' while its first copy is on its way.
+  // (your resmål with a table, else the first published one), by public transport or by car. main = true: only
+  // your main resmål by public transport, for the placeholder before an exact value. t is the table, or
+  // 'loading' while its first copy is on its way.
   function tablesFor(c, main = false) {
     let metas;
+    const car = !main && carMode(c);
+    const usable = (m) => !car || m.carGenerated;
     if (main) metas = [tableMetaFor(mainDestOf(c))].filter(Boolean);
     else if (c.list.dest === 'off') metas = [];
     else if (c.list.dest && c.list.dest !== 'mine') metas = [tableIndex().find((m) => m.key === c.list.dest) || tableIndex()[0]];
     else { metas = myTables(c); if (!metas.length) metas = [tableIndex()[0]]; }
     const out = [];
-    for (const meta of metas) {
-      const t = tableNow(meta.key);
+    for (const meta of metas.filter(usable)) {
+      const name = car ? `car:${meta.key}` : meta.key;
+      const t = tableNow(name);
       if (t) out.push({ meta, t });
-      else if (!tablesFailed.has(meta.key)) out.push({ meta, t: 'loading' });
+      else if (!tablesFailed.has(name)) out.push({ meta, t: 'loading' });
     }
     return out;
   }
@@ -749,6 +784,10 @@
   // stop's minutes; or walk or cycle the whole way. No network calls.
   function estimate(p, c, t) {
     if (!p || !t || typeof t !== 'object') return null;
+    if (t.car) {
+      const v = carMinutesAt(p, t);
+      return v == null ? null : { mins: Math.round(v), car: true, via: null, chg: 0, modes: '', last: null, access: null };
+    }
     let best = null;
     const consider = (o) => { if (!best || o.mins < best.mins) best = o; };
     const cy = Math.floor(p.lat * KM_LAT), cx = Math.floor(p.lon * t.kmLon), r = Math.ceil(ACCESS_RADIUS_KM);
@@ -776,8 +815,13 @@
   const MONTHS = ['jan', 'feb', 'mars', 'apr', 'maj', 'juni', 'juli', 'aug', 'sep', 'okt', 'nov', 'dec'];
   const fmtDay = (s) => { const [y, m, d] = String(s).split('-').map(Number); return `${d} ${MONTHS[m - 1]} ${y}`; };
   const TABLE_ICON = { t: ICON.train, s: ICON.tram, b: ICON.bus, f: ICON.ferry };
-  const estText = (e, meta) => `${e ? `ca ${e.mins} min` : 'pendling okänd'} till ${meta.label}`;
+  const estText = (e, meta, t) => (t && t.car ? `${e ? `ca ${e.mins} min` : 'körtid okänd'} med bil till ${meta.label}`
+    : `${e ? `ca ${e.mins} min` : 'pendling okänd'} till ${meta.label}`);
   function estTitle(e, t, c) {
+    if (t.car) {
+      return e ? `Bil i rusningstrafik till ${t.dest.name}, uppskattad: fritt flöde × ${String(t.data.rushFactor).replace('.', ',')} och ${t.data.parkMinutes} min att parkera. Vägar: © OpenStreetMap.`
+        : `Ingen väg i närheten, eller utanför området med körtider (60 km runt Göteborg).`;
+    }
     if (!e) return `Ingen hållplats eller väg inom räckhåll i tidtabellen till ${t.dest.name}.`;
     const way = (a) => (a.how === 'bike' ? 'Cykla' : 'Gå');
     const parts = [];
@@ -1836,7 +1880,7 @@
       const e = ready && p ? estimate(p, c, x.t) : null;
       if (!e) unknown = true;
       else if (!worst || e.mins > worst.mins) worst = e;
-      const text = ready ? estText(e, x.meta) : `… till ${x.meta.label}`;
+      const text = ready ? estText(e, x.meta, x.t) : `… till ${x.meta.label}`;
       const extra = i === 0 && sc != null ? dotHtml(tone(sc)) : '';
       const title = !ready ? '' : (p ? estTitle(e, x.t, c) : 'Bostadens position hittades inte.') + (i === 0 && sc != null ? ` Pendlingspoäng ${sc} av 100.` : '');
       const key = `${text}|${extra}|${title}`;
@@ -1892,12 +1936,13 @@
     const field = (label, f) => `<label style="display:flex;flex-direction:column;gap:4px;min-width:0"><span style="${small}">${label}</span><select data-f="${f}"></select></label>`;
     bar.innerHTML = `
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px 16px;align-items:end">
-        ${field('Pendling till', 'dest')}${field('Max restid', 'max')}${field('Över gränsen', 'over')}
+        ${field('Färdsätt', 'mode')}${field('Pendling till', 'dest')}${field('Max restid', 'max')}${field('Över gränsen', 'over')}
         <button type="button" data-f="sort" aria-pressed="false"><span aria-hidden="true">↕</span>Sortera efter pendling</button>
       </div>
       <div data-f="info" style="${small};margin-top:8px"></div>`;
     bar.querySelector('[data-f="max"]').innerHTML = `<option value="0">Alla</option>${LIST_MAXES.map((m) => `<option value="${m}">${m} min</option>`).join('')}`;
     bar.querySelector('[data-f="over"]').innerHTML = '<option value="dim">Tona ner</option><option value="hide">Dölj</option>';
+    bar.querySelector('[data-f="mode"]').innerHTML = '<option value="transit">Kollektivt</option><option value="car">Bil</option>';
     const update = (fn) => {
       const c = cfg();
       c.list = fn({ ...c.list });
@@ -1907,6 +1952,7 @@
     bar.addEventListener('change', (e) => {
       const f = e.target.dataset.f;
       if (f === 'dest') update((l) => ({ ...l, dest: e.target.value }));
+      if (f === 'mode') update((l) => ({ ...l, mode: e.target.value }));
       if (f === 'max') update((l) => ({ ...l, max: +e.target.value }));
       if (f === 'over') update((l) => ({ ...l, over: e.target.value }));
     });
@@ -1979,6 +2025,11 @@
     if (q('max').value !== String(max)) q('max').value = String(max);
     if (q('over').value !== c.list.over) q('over').value = c.list.over;
     q('over').disabled = !max;
+    // Färdsätt only once driving times exist.
+    const modeField = q('mode').closest('label');
+    if (modeField.hidden === hasCar()) modeField.hidden = !hasCar();
+    const mode = carMode(c) ? 'car' : 'transit';
+    if (q('mode').value !== mode) q('mode').value = mode;
     q('sort').setAttribute('aria-pressed', String(!!c.list.sort));
 
     const rows = cards.filter((x) => box.contains(x.card)).map((x, i) => ({ ...x, item: itemIn(box, x.card), i })).filter((r) => r.item);
@@ -2165,7 +2216,7 @@
       if (!info) return;
       dotSetup = { source: info.source, sourceLayer: info.sourceLayer, idKey: info.idKey, layers: info.layers };
     }
-    const key = `${settingsSig(c)}|${max}|${ts.map((x) => `${x.meta.key}:${x.t.data.generated}`).join(',')}`;
+    const key = `${settingsSig(c)}|${max}|${ts.map((x) => `${x.t.car ? 'car:' : ''}${x.meta.key}:${x.t.data.generated}`).join(',')}`;
     if (key !== dotOverKey) { dotOverKey = key; dotOver.clear(); }
     if (ts.length && max) {
       for (const [id, p] of currentDots(map, dotSetup)) {
@@ -2390,10 +2441,22 @@
     return { i0: Math.floor((s0 - padLat) / dLat), i1: Math.ceil((n0 + padLat) / dLat), j0: Math.floor((w0 - padLon) / dLon), j1: Math.ceil((e0 + padLon) / dLon) };
   }
 
+  // Driving minutes at the grid points of a view: read straight from the car table.
+  function carField(view, m, t) {
+    const dLat = m / (KM_LAT * 1000), dLon = m / (KM_LON_REF * 1000);
+    const vw = view.j1 - view.j0 + 1, vh = view.i1 - view.i0 + 1;
+    const out = new Float32Array(vw * vh);
+    for (let a = 0; a < vh; a++) for (let b = 0; b < vw; b++) {
+      const v = carMinutesAt({ lat: (view.i0 + a) * dLat, lon: (view.j0 + b) * dLon }, t);
+      out[a * vw + b] = v == null ? FIELD_CAP : v;
+    }
+    return out;
+  }
+
   // Minutes per grid point over the view: the longest commute over the destinations, as in the list.
   function fieldNow(view, m, c, ts) {
     const vw = view.j1 - view.j0 + 1;
-    const fields = ts.map((x) => fieldFor(view, m, c, x.t));
+    const fields = ts.map((x) => (x.t.car ? carField(view, m, x.t) : fieldFor(view, m, c, x.t)));
     const grid = fields[0];
     for (let d = 1; d < fields.length; d++) for (let k = 0; k < grid.length; k++) if (fields[d][k] > grid[k]) grid[k] = fields[d][k];
     return (i, j) => grid[(i - view.i0) * vw + (j - view.j0)];
@@ -2451,6 +2514,7 @@ self.onmessage = (e) => {
   }
   // The minutes for a view, then done(lookup): from the worker, or here.
   function fieldAsync(view, m, c, ts, done) {
+    if (ts.some((x) => x.t.car)) return done(fieldNow(view, m, c, ts)); // driving times are ready-made: quick here
     const w = getWorker();
     if (!w) return done(fieldNow(view, m, c, ts));
     const keys = ts.map((x) => `${x.meta.key}:${x.t.data.generated}`);
@@ -2484,7 +2548,7 @@ self.onmessage = (e) => {
     const b = plain(map.getBounds().toArray());
     const m = fieldSpacing(map.getZoom());
     const view = fieldView(b, m);
-    const fieldKey = `${settingsSig(c)}|${ts.map((x) => `${x.meta.key}:${x.t.data.generated}`).join(',')}|${m}|${view.i0},${view.i1},${view.j0},${view.j1}`;
+    const fieldKey = `${settingsSig(c)}|${ts.map((x) => `${x.t.car ? 'car:' : ''}${x.meta.key}:${x.t.data.generated}`).join(',')}|${m}|${view.i0},${view.i1},${view.j0},${view.j1}`;
     const sig = `${fieldKey}|${max}|${c.list.over}`;
     if (sig === shadeSig && map.getLayer(SHADE_ID)) return;
     shadeSig = sig;
@@ -3013,13 +3077,15 @@ self.onmessage = (e) => {
         <div class="grid2">
           <div class="field"><label for="lt">Pendling till, i listorna</label>
             <select id="lt" class="wide" data-k="lt" data-f="listDest">${destOpts.map(([v, l]) => opt(v, l, d.list.dest)).join('')}</select></div>
+          ${on && hasCar() ? `<div class="field"><label for="lmode">Färdsätt</label>
+            <select id="lmode" class="wide" data-k="lmode" data-f="listMode">${opt('transit', 'Kollektivt', d.list.mode)}${opt('car', 'Bil (i rusning, uppskattad)', d.list.mode)}</select></div>` : ''}
           ${on ? `<div class="field"><label for="lmax">Max restid</label>
             <select id="lmax" class="wide" data-k="lmax" data-f="listMax">${opt(0, 'Alla', d.list.max)}${LIST_MAXES.map((m) => opt(m, `${m} min`, d.list.max)).join('')}</select></div>` : ''}
         </div>
         ${on ? `<div class="row"><span class="lbl" id="lo-l" style="margin:0">Över gränsen</span>${seg('listOver', [{ v: 'hide', label: 'Dölj' }, { v: 'dim', label: 'Tona ner' }], d.list.over, 'lo-l')}</div>
           <label class="check solo"><input type="checkbox" data-act="listSort" data-k="listSort" ${d.list.sort ? 'checked' : ''}>Sortera efter pendling</label>
           ${status ? `<ul class="note" style="padding-left:1.2em">${status}</ul>` : ''}
-          <p class="note">Restidstabell: Trafiklab (Samtrafiken).</p>` : ''}
+          <p class="note">Restidstabell: Trafiklab (Samtrafiken).${hasCar() ? ' Körtider: © OpenStreetMap-bidragsgivare (OSRM), rusning uppskattad.' : ''}</p>` : ''}
       </section>`;
     }
 
@@ -3145,6 +3211,7 @@ self.onmessage = (e) => {
       const t = e.target;
       if (t.dataset.f === 'lastHome') { d.lastHome = t.value; paint(); }
       else if (t.dataset.f === 'listDest') { d.list.dest = t.value; paint(); }
+      else if (t.dataset.f === 'listMode') { d.list.mode = t.value; paint(); }
       else if (t.dataset.f === 'listMax') { d.list.max = +t.value; paint(); }
       else if (t.dataset.act === 'listSort') { d.list.sort = t.checked; paint(); }
       else if (t.dataset.f in numberFields) paint(); // weights and the like update presets and bars

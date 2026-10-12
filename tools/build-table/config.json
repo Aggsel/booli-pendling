@@ -23,6 +23,15 @@
     { "key": "arendal", "name": "Arendal Terminal", "label": "Arendal", "stopNamePattern": "^Arendal Terminal$", "lat": 57.70006, "lon": 11.80979, "radius": 150 },
     { "key": "amhult", "name": "Amhult Resecentrum", "label": "Amhult (Torslanda)", "stopNamePattern": "^Amhult Resecentrum$", "lat": 57.70956, "lon": 11.78017, "radius": 150 }
   ],
+  "car": {
+    "center": [57.7089, 11.9735],
+    "radiusKm": 60,
+    "spacingM": 1000,
+    "marginKm": 30,
+    "rushFactor": 1.3,
+    "parkMinutes": 3,
+    "maxSnapM": 800
+  },
   "spotCheck": [
     "Mölndal station", "Lindome station", "Kungsbacka station", "Partille station", "Lerum station", "Alingsås station", "Kungälv resecentrum", "Backa Kyrkogata", "Frölunda Torg", "Angered Centrum"
   ]
