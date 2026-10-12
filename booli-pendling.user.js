@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.8.1
+// @version      1.9.0
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -2145,43 +2145,123 @@
       mapHooked = map;
       dotSetup = null;
       mapSig = '';
+      shadeSig = '';
       try { map.on('idle', pageFn(scheduleMap)); } catch {}
     }
-    try {
-      if (dotSetup && !dotSetup.layers.every((l) => map.getLayer(l.id))) dotSetup = null; // the style changed
-      if (!dotSetup) {
-        const info = mapListings(map);
-        if (!info) return;
-        dotSetup = { source: info.source, sourceLayer: info.sourceLayer, idKey: info.idKey, layers: info.layers };
+    const ts = tablesFor(c).filter((x) => x.t !== 'loading');
+    const max = +c.list.max || 0;
+    try { dimDots(map, c, ts, max); } catch { dotSetup = null; }
+    try { shadeMap(map, c, ts, max); } catch { shadeSig = ''; }
+  }
+
+  function dimDots(map, c, ts, max) {
+    if (dotSetup && !dotSetup.layers.every((l) => map.getLayer(l.id))) dotSetup = null; // the style changed
+    if (!dotSetup) {
+      const info = mapListings(map);
+      if (!info) return;
+      dotSetup = { source: info.source, sourceLayer: info.sourceLayer, idKey: info.idKey, layers: info.layers };
+    }
+    const key = `${settingsSig(c)}|${max}|${ts.map((x) => `${x.meta.key}:${x.t.data.generated}`).join(',')}`;
+    if (key !== dotOverKey) { dotOverKey = key; dotOver.clear(); }
+    if (ts.length && max) {
+      for (const [id, p] of currentDots(map, dotSetup)) {
+        if (dotOver.has(id)) continue;
+        const es = ts.map((x) => estimate(p, c, x.t));
+        dotOver.set(id, es.every(Boolean) && Math.max(...es.map((e) => e.mins)) > max);
       }
-      const ts = tablesFor(c).filter((x) => x.t !== 'loading');
-      const max = +c.list.max || 0;
-      const key = `${settingsSig(c)}|${max}|${ts.map((x) => `${x.meta.key}:${x.t.data.generated}`).join(',')}`;
-      if (key !== dotOverKey) { dotOverKey = key; dotOver.clear(); }
-      if (ts.length && max) {
-        for (const [id, p] of currentDots(map, dotSetup)) {
-          if (dotOver.has(id)) continue;
-          const es = ts.map((x) => estimate(p, c, x.t));
-          dotOver.set(id, es.every(Boolean) && Math.max(...es.map((e) => e.mins)) > max);
+    }
+    // Every house seen so far stays in the list, so panning back and forth doesn't redraw the layer.
+    const over = [...dotOver].filter(([, o]) => o).map(([id]) => id);
+    const sig = `${dotSetup.source}|${dotSetup.idKey}|${c.list.over}|${over.length}|${max}`;
+    if (sig === mapSig) return;
+    mapSig = sig;
+    const to = c.list.over === 'hide' ? 0 : 0.25;
+    const idOf = dotSetup.idKey === ID_EXPR ? ['id'] : ['get', dotSetup.idKey];
+    for (const layer of dotSetup.layers) for (const prop of MAP_OPACITY[layer.type]) {
+      const k = `${layer.id}|${prop}`;
+      if (!mapOriginals.has(k)) mapOriginals.set(k, plain(map.getPaintProperty(layer.id, prop)));
+      const orig = mapOriginals.get(k);
+      const value = over.length
+        ? ['case', ['in', ['to-string', idOf], ['literal', over]], to, typeof orig === 'number' ? orig : 1]
+        : orig;
+      map.setPaintProperty(layer.id, prop, toPage(value));
+    }
+  }
+
+  // ---------- shading the areas over the limit ----------
+  // Grouped dots can't be dimmed one by one, so the map itself is shaded: a grid over the visible area, each cell
+  // estimated like a house, cells over the limit (or with no stop within reach) drawn grey under the dots.
+  // Cells next to each other in a row become one rectangle, so the layer stays small.
+  const SHADE_ID = 'bcs-commute-shade';
+  const SHADE_PX = 26; // cell size on screen
+  const SHADE_MAX_CELLS = 12000;
+  let shadeSig = '';
+  const shadeMemo = new Map(); // grid cell → over the limit? Cells sit on fixed lines, so panning reuses them.
+  let shadeMemoKey = '';
+
+  function shadeCells(bounds, zoom, test) {
+    const [[w0, s0], [e0, n0]] = bounds;
+    const midLat = (s0 + n0) / 2;
+    const mPerPx = (156543.03 * Math.cos((midLat * Math.PI) / 180)) / 2 ** zoom;
+    let cell = clamp(SHADE_PX * mPerPx, 120, 3000);
+    const kmLon = KM_LAT * Math.cos((midLat * Math.PI) / 180);
+    // A margin around the view, so panning a little doesn't show an unshaded edge.
+    const padLat = (n0 - s0) * 0.15, padLon = (e0 - w0) * 0.15;
+    const [w, s, e, n] = [w0 - padLon, s0 - padLat, e0 + padLon, n0 + padLat];
+    while (((n - s) * KM_LAT * 1000 / cell) * ((e - w) * kmLon * 1000 / cell) > SHADE_MAX_CELLS) cell *= 1.4;
+    const dLat = cell / (KM_LAT * 1000), dLon = cell / (kmLon * 1000);
+    // Snap the grid to fixed lines, so cells don't shift as the view moves.
+    const lat0 = Math.floor(s / dLat) * dLat, lon0 = Math.floor(w / dLon) * dLon;
+    const features = [];
+    for (let lat = lat0; lat < n; lat += dLat) {
+      let runStart = null;
+      for (let lon = lon0; lon < e + dLon; lon += dLon) {
+        const over = lon < e && test({ lat: lat + dLat / 2, lon: lon + dLon / 2 }, `${Math.round(cell)}:${Math.round(lat / dLat)}:${Math.round(lon / dLon)}`);
+        if (over && runStart == null) runStart = lon;
+        if (!over && runStart != null) {
+          features.push({ type: 'Feature', properties: {}, geometry: { type: 'Polygon',
+            coordinates: [[[runStart, lat], [lon, lat], [lon, lat + dLat], [runStart, lat + dLat], [runStart, lat]]] } });
+          runStart = null;
         }
       }
-      // Every house seen so far stays in the list, so panning back and forth doesn't redraw the layer.
-      const over = [...dotOver].filter(([, o]) => o).map(([id]) => id);
-      const sig = `${dotSetup.source}|${dotSetup.idKey}|${c.list.over}|${over.length}|${max}`;
-      if (sig === mapSig) return;
-      mapSig = sig;
-      const to = c.list.over === 'hide' ? 0 : 0.25;
-      const idOf = dotSetup.idKey === ID_EXPR ? ['id'] : ['get', dotSetup.idKey];
-      for (const layer of dotSetup.layers) for (const prop of MAP_OPACITY[layer.type]) {
-        const k = `${layer.id}|${prop}`;
-        if (!mapOriginals.has(k)) mapOriginals.set(k, plain(map.getPaintProperty(layer.id, prop)));
-        const orig = mapOriginals.get(k);
-        const value = over.length
-          ? ['case', ['in', ['to-string', idOf], ['literal', over]], to, typeof orig === 'number' ? orig : 1]
-          : orig;
-        map.setPaintProperty(layer.id, prop, toPage(value));
+    }
+    return { type: 'FeatureCollection', features };
+  }
+
+  function shadeMap(map, c, ts, max) {
+    const on = ts.length && max;
+    if (!on) {
+      if (map.getLayer(SHADE_ID)) map.removeLayer(SHADE_ID);
+      if (map.getSource(SHADE_ID)) map.removeSource(SHADE_ID);
+      shadeSig = '';
+      return;
+    }
+    const b = plain(map.getBounds().toArray());
+    const zoom = map.getZoom();
+    const r = (v) => v.toFixed(3);
+    const memoKey = `${settingsSig(c)}|${max}|${ts.map((x) => `${x.meta.key}:${x.t.data.generated}`).join(',')}`;
+    const sig = `${b.flat().map(r).join(',')}|${zoom.toFixed(1)}|${c.list.over}|${memoKey}`;
+    if (sig === shadeSig && map.getLayer(SHADE_ID)) return;
+    shadeSig = sig;
+    if (memoKey !== shadeMemoKey || shadeMemo.size > 200000) { shadeMemoKey = memoKey; shadeMemo.clear(); }
+    const data = shadeCells(b, zoom, (p, key) => {
+      let over = shadeMemo.get(key);
+      if (over === undefined) {
+        const es = ts.map((x) => estimate(p, c, x.t));
+        over = !es.every(Boolean) || Math.max(...es.map((e) => e.mins)) > max;
+        shadeMemo.set(key, over);
       }
-    } catch { dotSetup = null; }
+      return over;
+    });
+    const src = map.getSource(SHADE_ID);
+    if (src) src.setData(toPage(data));
+    else map.addSource(SHADE_ID, toPage({ type: 'geojson', data }));
+    const opacity = c.list.over === 'hide' ? 0.4 : 0.2;
+    if (!map.getLayer(SHADE_ID)) {
+      const below = dotSetup && dotSetup.layers[0] && map.getLayer(dotSetup.layers[0].id) ? dotSetup.layers[0].id : undefined;
+      map.addLayer(toPage({ id: SHADE_ID, type: 'fill', source: SHADE_ID,
+        paint: { 'fill-color': '#1b1b1b', 'fill-opacity': opacity, 'fill-antialias': false } }), below);
+    } else map.setPaintProperty(SHADE_ID, 'fill-opacity', opacity);
   }
 
   // Without a table for your destination, each card gets a small "Visa pendling" button, so nothing is fetched

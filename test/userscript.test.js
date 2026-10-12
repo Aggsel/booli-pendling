@@ -229,6 +229,43 @@ test('map dots in vector tiles (like Booli\'s listingSource) are dimmed by featu
   assert.ok(!calls.some(([id]) => id !== 'listing-dots'));
 });
 
+test('areas over the limit are shaded under the dots, so grouped dots are covered too', async () => {
+  const sources = new Map(), layers = [];
+  const before = (w) => {
+    const el = w.document.getElementById('map');
+    const fake = {
+      getContainer: () => el,
+      getStyle: () => ({ sources: { listingSource: { type: 'vector' } }, layers: [{ id: 'listing-dots', type: 'circle', source: 'listingSource', 'source-layer': 'l' }] }),
+      querySourceFeatures: () => listings.map((l) => ({ id: l.id, geometry: { type: 'Point', coordinates: [l.lon, l.lat] }, properties: {} })),
+      getPaintProperty: () => 1, setPaintProperty: () => {}, on: () => {},
+      getLayer: (id) => (id === 'listing-dots' || layers.some((l) => l.id === id) ? {} : undefined),
+      getBounds: () => ({ toArray: () => [[11.85, 57.5], [12.15, 57.72]] }),
+      getZoom: () => 11,
+      getSource: (id) => sources.get(id),
+      addSource: (id, src) => sources.set(id, { data: src.data, setData(d) { this.data = d; } }),
+      addLayer: (layer, beforeId) => layers.push({ ...layer, beforeId }),
+      removeLayer: () => {}, removeSource: () => {},
+    };
+    el.__reactFiber$test = { stateNode: el, memoizedProps: { map: fake }, memoizedState: null, return: null };
+  };
+  const store = { ...STORE, config: { list: { dest: 'mine', max: 30, over: 'dim', sort: false } } };
+  const { api } = load({ url: 'https://www.booli.se/sok/till-salu', body: `<div class="maplibregl-map" id="map"></div>${pageHtml}`, store, before });
+  await sleep(500);
+  const shade = layers.find((l) => l.id === 'bcs-commute-shade');
+  assert.equal(shade.type, 'fill');
+  assert.equal(shade.beforeId, 'listing-dots'); // under the dots
+  const inside = (p) => sources.get('bcs-commute-shade').data.features.some((f) => {
+    const [[w, s], [e,, ], [, n]] = f.geometry.coordinates[0];
+    return p.lon >= w && p.lon <= e && p.lat >= s && p.lat <= n;
+  });
+  const t = api.indexTable(TABLE), c = api.cfg();
+  const near = { lat: 57.65, lon: 12.035 }; // by Snabb buss: well under 30 min
+  const far = { lat: 57.55, lon: 12.0 }; // by Långsam: over 30 min
+  assert.ok(api.estimate(near, c, t).mins < 25 && api.estimate(far, c, t).mins > 35);
+  assert.equal(inside(near), false);
+  assert.equal(inside(far), true);
+});
+
 test('listings without a position stay visible and say "pendling okänd"', async () => {
   const body = `<main><ul id="list">${card({ id: 999001 })}${card({ id: 999002 })}</ul></main>`;
   const { w, close } = load({ url: 'https://www.booli.se/sok/till-salu', body, store: {
