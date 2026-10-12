@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.8.0
+// @version      1.8.1
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -42,6 +42,7 @@
   // Used until the published index (data/tables.json) has been fetched.
   const TABLES = [{ key: 'gbg-c', label: 'Göteborg C', name: 'Göteborg Centralstation', lat: 57.7089, lon: 11.9735 }];
   const TABLE_TTL = 7 * 24 * 3600 * 1000;
+  const INDEX_TTL = 6 * 3600 * 1000; // the index is small: check often, so new destinations and tables show up soon
   const TABLE_STALE_DAYS = 21;
   const LIST_MAXES = [20, 30, 40, 50, 60];
 
@@ -682,9 +683,16 @@
       const stored = GM_getValue(`table:${name}`, null);
       const v = stored ? parseRemote(name, stored.data) : null;
       tableMem.set(name, v);
-      if (!v || Date.now() - stored.t > TABLE_TTL) refreshTable(name);
+      const oldIndex = name === 'index' && v && !v.every((m) => m.generated); // from before the index had build times
+      if (!v || oldIndex || Date.now() - stored.t > (name === 'index' ? INDEX_TTL : TABLE_TTL)) refreshTable(name);
     }
-    return tableMem.get(name);
+    const v = tableMem.get(name);
+    // A table rebuilt since our copy (the index says so) is fetched again right away.
+    if (v && name !== 'index' && !tableJobs.has(name)) {
+      const meta = (tableMem.get('index') || []).find((m) => m.key === name);
+      if (meta && meta.generated && meta.generated > v.data.generated) refreshTable(name);
+    }
+    return v;
   }
   function refreshTable(name) {
     if (!tableJobs.has(name)) {
@@ -1850,7 +1858,7 @@
   // Booli's Sökfilter button, the "Spara sökning" button next to it, and the row holding both.
   function booliControls() {
     const buttons = [...document.querySelectorAll('button, a')].filter((b) => !b.closest('[data-bcs-filter]'));
-    const filter = buttons.find((b) => /^Sökfilter\b/.test(b.textContent.trim()));
+    const filter = buttons.find((b) => /^Sökfilter/.test(b.textContent.trim())); // "Sökfilter1": the badge follows without a space
     if (!filter) return null;
     const save = buttons.find((b) => /^Spara sökning/.test(b.textContent.trim()));
     let row = filter.parentElement;
@@ -1880,15 +1888,14 @@
     const bar = document.createElement('section');
     bar.setAttribute('data-bcs-filter', '');
     bar.setAttribute('aria-label', 'Pendling');
-    const field = (label, f) => `<label style="display:flex;flex-direction:column;gap:6px;min-width:0"><span>${label}</span><select data-f="${f}"></select></label>`;
+    const small = 'font-size:14px;line-height:1.3;color:#6b6b69';
+    const field = (label, f) => `<label style="display:flex;flex-direction:column;gap:4px;min-width:0"><span style="${small}">${label}</span><select data-f="${f}"></select></label>`;
     bar.innerHTML = `
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px 16px;align-items:end">
         ${field('Pendling till', 'dest')}${field('Max restid', 'max')}${field('Över gränsen', 'over')}
+        <button type="button" data-f="sort" aria-pressed="false"><span aria-hidden="true">↕</span>Sortera efter pendling</button>
       </div>
-      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-top:16px">
-        <button type="button" data-f="sort" aria-pressed="false"><span aria-hidden="true">↕ </span>Sortera efter pendling</button>
-        <span data-f="info" style="opacity:.75"></span>
-      </div>`;
+      <div data-f="info" style="${small};margin-top:8px"></div>`;
     bar.querySelector('[data-f="max"]').innerHTML = `<option value="0">Alla</option>${LIST_MAXES.map((m) => `<option value="${m}">${m} min</option>`).join('')}`;
     bar.querySelector('[data-f="over"]').innerHTML = '<option value="dim">Tona ner</option><option value="hide">Dölj</option>';
     const update = (fn) => {
@@ -1930,7 +1937,8 @@
     const selectStyle = { ...lookStyle(off), width: '100%', appearance: 'none', '-webkit-appearance': 'none', 'padding-right': '44px',
       'background-image': CHEVRON_BG, 'background-repeat': 'no-repeat', 'background-position': 'right 16px center' };
     for (const sel of filterBar.querySelectorAll('select')) applyStyle(sel, selectStyle);
-    applyStyle(filterBar.querySelector('[data-f="sort"]'), { ...lookStyle(c.list.sort ? on : off), display: 'inline-flex', 'align-items': 'center', gap: '.4em' });
+    applyStyle(filterBar.querySelector('[data-f="sort"]'), { ...lookStyle(c.list.sort ? on : off), display: 'inline-flex', 'align-items': 'center',
+      'justify-content': 'center', gap: '.4em', width: '100%', 'white-space': 'nowrap' });
   }
 
   // The list itself: the deepest element holding most of the cards, so a stray card elsewhere on the page
@@ -1986,6 +1994,7 @@
     const info = !max ? '' : over === 0 ? `Alla ${rows.length} inom ${max} min` : c.list.over === 'hide'
       ? `Visar ${rows.length - over} av ${rows.length}` : `${over} av ${rows.length} över ${max} min`;
     if (q('info').textContent !== info) q('info').textContent = info;
+    q('info').hidden = !info;
 
     if (c.list.sort) {
       if (!box.dataset.bcsSort) {

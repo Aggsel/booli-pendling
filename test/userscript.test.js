@@ -274,7 +274,7 @@ test('choosing a destination in the bar switches every card to that table', () =
 });
 
 test('the bar sits under Booli\'s Sökfilter row and copies its buttons\' look', () => {
-  const head = `<div id="head"><div id="search"></div><div id="row"><button style="height:56px;border:1px solid rgb(10, 20, 30);border-radius:6px;font-size:18px">Sökfilter</button>
+  const head = `<div id="head"><div id="search"></div><div id="row"><button style="height:56px;border:1px solid rgb(10, 20, 30);border-radius:6px;font-size:18px"><svg></svg><span>Sökfilter</span><span>1</span></button>
     <button style="background-color:rgb(27, 27, 27);color:rgb(255, 255, 255)">Spara sökning</button></div><p>Villor till salu</p></div>`;
   const { w } = load({ url: 'https://www.booli.se/sok/till-salu', body: head + pageHtml, store: STORE });
   const doc = w.document, bar = doc.querySelector('[data-bcs-filter]');
@@ -308,6 +308,15 @@ test('two resmål with tables: one estimate each, and the filter uses the longes
   assert.equal(doc.querySelector('[data-f="dest"]').value, 'mine');
   assert.equal(doc.querySelector('[data-f="dest"]').selectedOptions[0].textContent, 'Mina resmål (Göteborg C, Lindholmen)');
   assert.deepEqual(requests, []);
+});
+
+test('an index older than 6 hours is fetched again, and so is a table the index says was rebuilt', () => {
+  const old = Date.now() - 7 * 3600 * 1000;
+  const rebuilt = { ...TABLE.destination, label: 'Göteborg C', generated: '2099-01-01T00:00:00Z' };
+  const { requests } = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml, store: {
+    'table:index': { t: old, data: { version: 1, tables: [rebuilt] } }, 'table:gbg-c': { t: Date.now(), data: TABLE } } });
+  assert.ok(requests.includes('https://raw.githubusercontent.com/Aggsel/booli-pendling/main/data/tables.json'));
+  assert.ok(requests.includes('https://raw.githubusercontent.com/Aggsel/booli-pendling/main/data/travel-times-gbg-c.json'));
 });
 
 test('the table is fetched on first use when nothing is stored', async () => {
