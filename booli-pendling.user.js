@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.9.2
+// @version      1.9.3
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -771,6 +771,43 @@
       if (on && mins <= c.directMax) consider({ mins, access: { how, mins }, direct: true, via: null, chg: 0, modes: '', last: null });
     }
     return best;
+  }
+
+  // For the map shading: can anywhere in the rectangle [s, w, n, e] (a point when s = n and w = e) reach the
+  // destination within `max` minutes? The same sums as estimate(), measured from the rectangle's nearest point,
+  // but it stops at the first way that works, skips stops that can't help, and uses flat distances (fine over a
+  // few kilometres). Much faster than estimate() in the dense city centre.
+  function reachable(rect, c, t, max) {
+    const [s, w, n, e] = rect;
+    const kmLon = t.kmLon;
+    const distKm = (p) => {
+      const dy = (p.lat - Math.min(n, Math.max(s, p.lat))) * KM_LAT, dx = (p.lon - Math.min(e, Math.max(w, p.lon))) * kmLon;
+      return Math.sqrt(dx * dx + dy * dy);
+    };
+    const direct = distKm(t.dest) * 1.3;
+    for (const [on, kmh] of [[c.accessModes.walk, c.walkSpeed], [c.accessModes.bike, c.bikeSpeed]]) {
+      if (on && minsAt(direct, kmh) <= Math.min(c.directMax, max)) return true;
+    }
+    const reachKm = (kmh, spare) => Math.min(ACCESS_RADIUS_KM, ((Math.min(c.accessMax, spare) + 0.5) / 60) * kmh / 1.3);
+    const reach = Math.max(reachKm(c.walkSpeed, max), c.accessModes.bike ? reachKm(c.bikeSpeed, max - c.stationBuffer) : 0);
+    if (reach <= 0) return false;
+    const r = Math.ceil(reach);
+    for (let cy = Math.floor(s * KM_LAT) - r; cy <= Math.floor(n * KM_LAT) + r; cy++) {
+      for (let cx = Math.floor(w * kmLon) - r; cx <= Math.floor(e * kmLon) + r; cx++) {
+        for (const st of t.grid.get(`${cy},${cx}`) || []) {
+          if (st.min > max) continue;
+          const km = distKm(st);
+          if (km > reach) continue;
+          const walk = minsAt(km * 1.3, c.walkSpeed);
+          if (walk <= c.accessMax && walk + st.min <= max) return true;
+          if (c.accessModes.bike) {
+            const bike = minsAt(km * 1.3, c.bikeSpeed);
+            if (bike <= c.accessMax && bike + c.stationBuffer + st.min <= max) return true;
+          }
+        }
+      }
+    }
+    return false;
   }
 
   const MONTHS = ['jan', 'feb', 'mars', 'apr', 'maj', 'juni', 'juli', 'aug', 'sep', 'okt', 'nov', 'dec'];
@@ -2193,67 +2230,90 @@
   }
 
   // ---------- shading the areas over the limit ----------
-  // Grouped dots can't be dimmed one by one, so the map itself is shaded: a grid over the visible area, each cell
-  // estimated like a house, cells over the limit (or with no stop within reach) drawn light grey under the dots,
-  // and a dark line along the edge of the area within the limit, so it stands apart from Booli's own grey mask.
-  // Cells have fixed sizes (125 m, 250 m, 500 m …) on fixed lines, so they stay put as you pan and zoom.
+  // Grouped dots can't be dimmed one by one, so the map itself is shaded: a grid over the visible area, cells over
+  // the limit (or with no stop within reach) drawn light grey under the dots, and a dark line along the edge of the
+  // area within the limit. Cells have fixed sizes (125 m, 250 m, 500 m …) on fixed lines, so they stay put as you
+  // pan and zoom. Along the edge the grid is finer: a cell that is only partly within the limit is split into
+  // smaller cells, so small pockets near a station show even when zoomed out.
   const SHADE_ID = 'bcs-commute-shade';
-  const SHADE_PX = 24; // smallest cell size on screen
+  const SHADE_PX = 32; // base cell size on screen
+  const SHADE_SPLIT = 4; // edge cells are split into 4 × 4
+  const SHADE_MIN_M = 125; // smallest cell
   const SHADE_REF_LAT = 57.7; // fixed east-west spacing for the grid
   let shadeSig = '';
-  const shadeMemo = new Map(); // grid cell → over the limit? Reused across panning and zooming.
+  const shadeMemo = new Map(); // cell or point → over the limit? Reused across panning and zooming.
   let shadeMemoKey = '';
 
-  function shadeCells(bounds, zoom, test) {
+  // judge.overAt(point, key): is this point over the limit? judge.allOver(rect, key): is every point in it over?
+  function shadeCells(bounds, zoom, judge) {
     const [[w0, s0], [e0, n0]] = bounds;
     const mPerPx = (156543.03 * Math.cos((SHADE_REF_LAT * Math.PI) / 180)) / 2 ** zoom;
-    let cell = 125;
-    while (cell / mPerPx < SHADE_PX && cell < 8000) cell *= 2;
+    let cell = SHADE_MIN_M;
+    while (cell / mPerPx < SHADE_PX && cell < 16000) cell *= 2;
     const kmLon = KM_LAT * Math.cos((SHADE_REF_LAT * Math.PI) / 180);
     // A margin around the view, so panning a little doesn't show an unshaded edge.
     const padLat = (n0 - s0) * 0.15, padLon = (e0 - w0) * 0.15;
     const [w, s, e, n] = [w0 - padLon, s0 - padLat, e0 + padLon, n0 + padLat];
     const cellsFor = (m) => ((n - s) * KM_LAT * 1000 / m) * ((e - w) * kmLon * 1000 / m);
-    while (cellsFor(cell) > 12000 && cell < 8000) cell *= 2;
+    while (cellsFor(cell) > 6000 && cell < 16000) cell *= 2;
+    const split = Math.max(1, Math.min(SHADE_SPLIT, cell / SHADE_MIN_M));
+    const fine = cell / split;
     const dLat = cell / (KM_LAT * 1000), dLon = cell / (kmLon * 1000);
-    const i0 = Math.floor(s / dLat), i1 = Math.ceil(n / dLat), j0 = Math.floor(w / dLon), j1 = Math.ceil(e / dLon);
-    const over = [];
-    for (let i = i0; i < i1; i++) {
-      const row = [];
-      for (let j = j0; j < j1; j++) row.push(test({ lat: (i + 0.5) * dLat, lon: (j + 0.5) * dLon }, `${cell}:${i}:${j}`));
-      over.push(row);
+    const fLat = dLat / split, fLon = dLon / split;
+    const I0 = Math.floor(s / dLat), I1 = Math.ceil(n / dLat), J0 = Math.floor(w / dLon), J1 = Math.ceil(e / dLon);
+    // The fine grid: rows i from i0, columns j from j0. Whole base cells fill all their fine cells at once.
+    const i0 = I0 * split, i1 = I1 * split, j0 = J0 * split, j1 = J1 * split;
+    const over = Array.from({ length: i1 - i0 }, () => new Array(j1 - j0));
+    const fill = (I, J, v) => { for (let a = 0; a < split; a++) for (let b = 0; b < split; b++) over[I * split + a - i0][J * split + b - j0] = v; };
+    const pointKey = (size, i, j) => `p${size}:${i}:${j}`;
+    for (let I = I0; I < I1; I++) {
+      for (let J = J0; J < J1; J++) {
+        const rect = [I * dLat, J * dLon, (I + 1) * dLat, (J + 1) * dLon];
+        if (judge.allOver(rect, `r${cell}:${I}:${J}`)) { fill(I, J, true); continue; }
+        // Some point is within. If the centre and the corners are too, take the whole cell as within.
+        const samples = [[I + 0.5, J + 0.5], [I, J], [I + 1, J], [I, J + 1], [I + 1, J + 1]];
+        const someOver = split > 1 && samples.some(([y, x]) => judge.overAt({ lat: y * dLat, lon: x * dLon }, pointKey(cell, y * 2, x * 2)));
+        if (!someOver) {
+          if (split === 1) fill(I, J, judge.overAt({ lat: (I + 0.5) * dLat, lon: (J + 0.5) * dLon }, pointKey(cell, I * 2 + 1, J * 2 + 1)));
+          else fill(I, J, false);
+          continue;
+        }
+        for (let a = 0; a < split; a++) for (let b = 0; b < split; b++) {
+          const i = I * split + a, j = J * split + b;
+          over[i - i0][j - j0] = judge.overAt({ lat: (i + 0.5) * fLat, lon: (j + 0.5) * fLon }, pointKey(fine, i * 2 + 1, j * 2 + 1));
+        }
+      }
     }
-    const at = (i, j) => over[i - i0] && over[i - i0][j - j0];
-    const inGrid = (i, j) => i >= i0 && i < i1 && j >= j0 && j < j1;
+    const at = (i, j) => over[i - i0][j - j0];
     const features = [];
     const line = (a, b) => features.push({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [a, b] } });
-    for (let i = i0; i < i1; i++) {
+    for (let i = i0; i < i1; i++) { // grey: runs of cells over the limit in each fine row
       let run = null;
       for (let j = j0; j <= j1; j++) {
         const o = j < j1 && at(i, j);
         if (o && run == null) run = j;
         if (!o && run != null) {
-          const [x0, x1, y0, y1] = [run * dLon, j * dLon, i * dLat, (i + 1) * dLat];
+          const [x0, x1, y0, y1] = [run * fLon, j * fLon, i * fLat, (i + 1) * fLat];
           features.push({ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [[[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]] } });
           run = null;
         }
       }
     }
     // The edge between cells over and within the limit, merged into long straight pieces.
-    for (let i = i0; i <= i1; i++) { // horizontal edges, below row i
+    for (let i = i0 + 1; i < i1; i++) { // horizontal edges, below fine row i
       let run = null;
       for (let j = j0; j <= j1; j++) {
-        const edge = j < j1 && inGrid(i - 1, j) && inGrid(i, j) && at(i - 1, j) !== at(i, j);
+        const edge = j < j1 && at(i - 1, j) !== at(i, j);
         if (edge && run == null) run = j;
-        if (!edge && run != null) { line([run * dLon, i * dLat], [j * dLon, i * dLat]); run = null; }
+        if (!edge && run != null) { line([run * fLon, i * fLat], [j * fLon, i * fLat]); run = null; }
       }
     }
-    for (let j = j0; j <= j1; j++) { // vertical edges, left of column j
+    for (let j = j0 + 1; j < j1; j++) { // vertical edges, left of fine column j
       let run = null;
       for (let i = i0; i <= i1; i++) {
-        const edge = i < i1 && inGrid(i, j - 1) && inGrid(i, j) && at(i, j - 1) !== at(i, j);
+        const edge = i < i1 && at(i, j - 1) !== at(i, j);
         if (edge && run == null) run = i;
-        if (!edge && run != null) { line([j * dLon, run * dLat], [j * dLon, i * dLat]); run = null; }
+        if (!edge && run != null) { line([j * fLon, run * fLat], [j * fLon, i * fLat]); run = null; }
       }
     }
     return { type: 'FeatureCollection', features };
@@ -2275,14 +2335,15 @@
     if (sig === shadeSig && map.getLayer(SHADE_ID)) return;
     shadeSig = sig;
     if (memoKey !== shadeMemoKey || shadeMemo.size > 200000) { shadeMemoKey = memoKey; shadeMemo.clear(); }
-    const data = shadeCells(b, zoom, (p, key) => {
-      let over = shadeMemo.get(key);
-      if (over === undefined) {
-        const es = ts.map((x) => estimate(p, c, x.t));
-        over = !es.every(Boolean) || Math.max(...es.map((e) => e.mins)) > max;
-        shadeMemo.set(key, over);
-      }
-      return over;
+    const memo = (key, fn) => {
+      let v = shadeMemo.get(key);
+      if (v === undefined) shadeMemo.set(key, (v = fn()));
+      return v;
+    };
+    const data = shadeCells(b, zoom, {
+      // Over the limit for any destination counts as over (the list uses the longest commute).
+      overAt: (p, key) => memo(key, () => ts.some((x) => !reachable([p.lat, p.lon, p.lat, p.lon], c, x.t, max))),
+      allOver: (rect, key) => memo(key, () => ts.some((x) => !reachable(rect, c, x.t, max))),
     });
     const src = map.getSource(SHADE_ID);
     if (src) src.setData(toPage(data));
@@ -3214,7 +3275,7 @@
     GM_setClipboard(JSON.stringify(debug, null, 2));
     alert('Kartdata kopierad. Klistra in den i chatten.');
   });
-  if (window.__BCS_TEST__) Object.assign(window.__BCS_TEST__, { estimate, indexTable, positionsIn, cfg, DEFAULTS });
+  if (window.__BCS_TEST__) Object.assign(window.__BCS_TEST__, { estimate, reachable, shadeCells, indexTable, positionsIn, cfg, DEFAULTS });
   GM_registerMenuCommand('Kopiera positionsdata för felsökning', async () => {
     const id = listingId();
     if (!id) return alert('Öppna en bostad på Booli först.');

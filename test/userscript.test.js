@@ -80,6 +80,21 @@ test('estimate(): walking, cycling, Som längst, direct bike, no stop nearby', (
   close();
 });
 
+test('the map\'s quick check agrees with estimate() (apart from a minute of rounding at the limit)', () => {
+  const { api } = load();
+  const t = api.indexTable(TABLE);
+  for (const c of [api.cfg(), { ...api.cfg(), accessModes: { walk: true, bike: false, bus: true } }]) {
+    for (const max of [15, 25, 35, 50]) {
+      for (let i = 0; i < 400; i++) {
+        const p = { lat: 57.5 + (i % 20) * 0.012, lon: 11.85 + Math.floor(i / 20) * 0.017 };
+        const e = api.estimate(p, c, t);
+        if (e && Math.abs(e.mins - max) <= 1) continue; // right at the limit: rounding may differ
+        assert.equal(api.reachable([p.lat, p.lon, p.lat, p.lon], c, t, max), !!e && e.mins <= max, `${p.lat},${p.lon} max ${max}`);
+      }
+    }
+  }
+});
+
 test('estimate() runs in well under 1 ms per listing', () => {
   const { api, close } = load();
   const t = api.indexTable({ ...TABLE, stops: Array.from({ length: 5000 }, (_, i) => [57.3 + (i % 100) / 100, 11.6 + Math.floor(i / 100) / 50, 30, 0, 't', null, `S${i}`]) });
@@ -282,6 +297,35 @@ test('areas over the limit are shaded under the dots, so grouped dots are covere
   assert.ok(corners().every(([x]) => Math.abs(x / step - Math.round(x / step)) < 1e-6), 'cells stay on the same grid lines');
   assert.equal(inside(far), true);
   assert.equal(fake.idleCount, 1, 'one idle listener, however often the map is checked');
+});
+
+test('zoomed out, a small pocket within the limit near a stop is not lost in a big square', async () => {
+  // One stop, 5 min from the destination, far from it: only a walk of about a kilometre around it is within 20 min.
+  const POCKET = { ...TABLE, generated: new Date().toISOString(), stops: [[57.6205, 11.8012, 5, 0, 't', null, 'Fickan']] };
+  const sources = new Map();
+  const before = (w) => {
+    const el = w.document.getElementById('map');
+    const fake = {
+      getContainer: () => el, getStyle: () => ({ sources: {}, layers: [] }), querySourceFeatures: () => [],
+      getPaintProperty: () => 1, setPaintProperty: () => {}, on: () => {}, getLayer: () => undefined,
+      getBounds: () => ({ toArray: () => [[11.4, 57.4], [12.3, 57.85]] }), getZoom: () => 9.5,
+      getSource: (id) => sources.get(id),
+      addSource: (id, src) => sources.set(id, { data: src.data, setData(d) { this.data = d; } }),
+      addLayer: () => {}, removeLayer: () => {}, removeSource: () => {},
+    };
+    el.__reactFiber$test = { stateNode: el, memoizedProps: { map: fake }, memoizedState: null, return: null };
+  };
+  const store = { 'table:index': INDEX(POCKET), 'table:gbg-c': { t: Date.now(), data: POCKET },
+    config: { accessModes: { walk: true, bike: false, bus: true }, list: { dest: 'mine', max: 20, over: 'dim', sort: false } } };
+  load({ url: 'https://www.booli.se/sok/till-salu', body: '<div class="maplibregl-map" id="map"></div>', store, before });
+  await sleep(500);
+  const boxes = sources.get('bcs-commute-shade').data.features.filter((f) => f.geometry.type === 'Polygon');
+  const inside = (p) => boxes.some((f) => {
+    const [[w, s], [e], [, n]] = [f.geometry.coordinates[0][0], f.geometry.coordinates[0][1], f.geometry.coordinates[0][2]];
+    return p.lon >= w && p.lon <= e && p.lat >= s && p.lat <= n;
+  });
+  assert.equal(inside({ lat: 57.6205, lon: 11.8012 }), false, 'the stop itself is within the limit');
+  assert.equal(inside({ lat: 57.6205, lon: 11.9 }), true, '6 km away is over');
 });
 
 test('listings without a position stay visible and say "pendling okänd"', async () => {
