@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.12.0
+// @version      1.12.1
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -2372,9 +2372,7 @@
 
   // The contour: the area over the limit as polygons (whole cells merged per row, cut cells shaped by the
   // crossing points) and the edge as lines. value(i, j) gives the minutes at grid point (i, j).
-  // inArea(i, j), if given: is the point inside Booli's search area? Cells wholly outside get no shading, and the
-  // edge isn't drawn where it would cross out of the area (Booli already greys and outlines everything outside).
-  function contour(view, m, value, max, inArea) {
+  function contour(view, m, value, max) {
     const { i0, i1, j0, j1 } = view;
     const dLat = m / (KM_LAT * 1000), dLon = m / (KM_LON_REF * 1000);
     const P = (i, j) => [j * dLon, i * dLat];
@@ -2394,9 +2392,7 @@
       for (let j = j0; j <= j1; j++) {
         // Cell corners, going round: south-west, south-east, north-east, north-west.
         const corners = j < j1 ? [[i, j], [i, j + 1], [i + 1, j + 1], [i + 1, j]] : null;
-        const inside = corners && inArea ? corners.map(([a, b]) => inArea(a, b)) : null;
-        const outside = inside && !inside.some(Boolean);
-        const over = corners && !outside ? corners.map(([a, b]) => value(a, b) > max) : null;
+        const over = corners ? corners.map(([a, b]) => value(a, b) > max) : null;
         const full = over && over.every(Boolean);
         if (full) { if (run == null) run = j; continue; }
         if (run != null) { poly([P(i, run), P(i, j), P(i + 1, j), P(i + 1, run)]); run = null; }
@@ -2410,7 +2406,6 @@
         }
         poly(ring.map((r) => r.p));
         // The edge: the stretches of the ring that cut across the cell, from one crossing point to the next.
-        if (inside && !inside.every(Boolean)) continue; // at the area's border, Booli's own outline is enough
         for (let k = 0; k < ring.length; k++) {
           const r1 = ring[k], r2 = ring[(k + 1) % ring.length];
           if (r1.x && r2.x) segs.push([r1.p, r2.p]);
@@ -2566,10 +2561,7 @@ self.onmessage = (e) => {
       const want = shadeWant;
       if (!want || want.fieldKey !== shadeField.key) return; // a newer view is on its way
       want.done = true;
-      try {
-        const area = searchArea(map);
-        drawShade(map, want.c, contour(want.view, want.m, shadeField.value, want.max, area ? areaGrid(area, want.view, want.m) : null));
-      } catch { shadeSig = ''; }
+      try { drawShade(map, want.c, contour(want.view, want.m, shadeField.value, want.max)); } catch { shadeSig = ''; }
     };
     // Only the limit changed: the minutes are already there.
     if (shadeField && shadeField.key === fieldKey) return draw();
@@ -2577,69 +2569,8 @@ self.onmessage = (e) => {
     fieldAsync(view, m, c, ts, (value) => { shadeField = { key: fieldKey, value }; draw(); });
   }
 
-  // ---------- Booli's search area ----------
-  // Booli draws the searched area as a GeoJSON source and greys out the rest. Read the area's rings, and for a view
-  // work out which grid points lie inside it, row by row (scanline, even-odd: holes and several parts work).
-  const AREA_SOURCES = /polygon/i, MASK_SOURCES = /polygon|mask/i;
-  let areaCache = { sig: '', rings: null }, areaGridCache = { key: '', fn: null };
-  function searchArea(map) {
-    const style = plain(map.getStyle());
-    const name = Object.keys(style.sources || {}).find((k) => AREA_SOURCES.test(k) && style.sources[k].type === 'geojson');
-    if (!name) return null;
-    // MapLibre versions differ: serialize() may give the data, or wrap it ({ geojson }), or only getData() has it.
-    const src = map.getSource(name);
-    let data = null;
-    try { data = plain(src.serialize().data); } catch {}
-    if (data && data.geojson) data = data.geojson;
-    if (!data || typeof data !== 'object' || !data.type) {
-      if (areaCache.async !== name && src && typeof src.getData === 'function') {
-        areaCache.async = name; // ask once; the answer is kept and the map redrawn
-        Promise.resolve(src.getData()).then((d) => { areaCache.fetched = plain(d); shadeSig = ''; scheduleMap(); }).catch(() => {});
-      }
-      data = areaCache.fetched || null;
-    }
-    if (!data || typeof data !== 'object') return null;
-    const geoms = data.type === 'FeatureCollection' ? data.features.map((f) => f.geometry) : data.type === 'Feature' ? [data.geometry] : [data];
-    const rings = [];
-    for (const g of geoms.filter(Boolean)) {
-      if (g.type === 'Polygon') rings.push(...g.coordinates);
-      if (g.type === 'MultiPolygon') for (const poly of g.coordinates) rings.push(...poly);
-    }
-    if (!rings.length) return null;
-    const sig = `${rings.length}:${rings.reduce((n, r) => n + r.length, 0)}:${rings[0][0]}`;
-    if (sig !== areaCache.sig) areaCache = { ...areaCache, sig, rings };
-    return areaCache;
-  }
-  function areaGrid(area, view, m) {
-    const key = `${area.sig}|${m}|${view.i0},${view.i1},${view.j0},${view.j1}`;
-    if (areaGridCache.key === key) return areaGridCache.fn;
-    const dLat = m / (KM_LAT * 1000), dLon = m / (KM_LON_REF * 1000);
-    const H = view.i1 - view.i0 + 1, W = view.j1 - view.j0 + 1;
-    const cross = Array.from({ length: H }, () => []);
-    for (const ring of area.rings) {
-      for (let k = 0; k + 1 < ring.length; k++) {
-        const [x1, y1] = ring[k], [x2, y2] = ring[k + 1];
-        if (y1 === y2) continue;
-        // Grid rows this edge crosses (half-open, so a vertex on a row counts once).
-        const lo = Math.max(view.i0, Math.ceil(Math.min(y1, y2) / dLat)), hi = Math.min(view.i1, Math.ceil(Math.max(y1, y2) / dLat) - 1);
-        for (let i = lo; i <= hi; i++) {
-          const y = i * dLat;
-          cross[i - view.i0].push(x1 + ((y - y1) * (x2 - x1)) / (y2 - y1));
-        }
-      }
-    }
-    const inside = new Uint8Array(W * H);
-    cross.forEach((xs, a) => {
-      xs.sort((p, q) => p - q);
-      for (let q = 0; q + 1 < xs.length; q += 2) {
-        const b0 = Math.max(0, Math.ceil(xs[q] / dLon) - view.j0), b1 = Math.min(W - 1, Math.floor(xs[q + 1] / dLon) - view.j0);
-        for (let b = b0; b <= b1; b++) inside[a * W + b] = 1;
-      }
-    });
-    const fn = (i, j) => inside[(i - view.i0) * W + (j - view.j0)] === 1;
-    areaGridCache = { key, fn };
-    return fn;
-  }
+  // Booli's own search-area layers (its grey outside the area, and the area's outline) come from these sources.
+  const MASK_SOURCES = /polygon|mask/i;
 
   const SHADE_COLOR = '#5b3a9e'; // violet: not to be confused with Booli's grey for outside the search area
   function drawShade(map, c, data) {
@@ -2648,6 +2579,7 @@ self.onmessage = (e) => {
     else map.addSource(SHADE_ID, toPage({ type: 'geojson', data }));
     const opacity = c.list.over === 'hide' ? 0.32 : 0.16;
     // Under Booli's search-area layers (its grey outside the area and the area's outline), else under the dots.
+    // Outside the search area Booli's grey then covers the shading and mutes it: no cut edges, no double grey.
     const layers = plain(map.getStyle()).layers || [];
     const booliArea = layers.find((l) => MASK_SOURCES.test(l.source || ''));
     const below = booliArea ? booliArea.id : dotSetup && dotSetup.layers[0] && map.getLayer(dotSetup.layers[0].id) ? dotSetup.layers[0].id : undefined;
@@ -2657,7 +2589,7 @@ self.onmessage = (e) => {
     } else map.setPaintProperty(SHADE_ID, 'fill-opacity', opacity);
     if (!map.getLayer(`${SHADE_ID}-edge`)) {
       map.addLayer(toPage({ id: `${SHADE_ID}-edge`, type: 'line', source: SHADE_ID, filter: ['==', ['geometry-type'], 'LineString'],
-        layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': SHADE_COLOR, 'line-opacity': 0.85, 'line-width': 2.5 } }), below);
+        layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': SHADE_COLOR, 'line-opacity': 0.7, 'line-width': 2 } }), below);
     }
   }
 
