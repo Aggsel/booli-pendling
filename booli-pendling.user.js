@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.12.1
+// @version      1.13.0
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -1816,6 +1816,7 @@
       if (line) fillCard(line, id, url, c);
     }
     decorateListCards(c);
+    try { decoratePanel(c); } catch {}
     scheduleMap();
   }
 
@@ -1930,63 +1931,207 @@
     for (const [k, v] of Object.entries(style)) if (v && !/^\s|\s$|^0 $/.test(String(v))) el.style.setProperty(k, String(v));
   }
 
-  function makeFilterBar() {
-    const bar = document.createElement('section');
-    bar.setAttribute('data-bcs-filter', '');
-    bar.setAttribute('aria-label', 'Pendling');
-    const small = 'font-size:14px;line-height:1.3;color:#6b6b69';
-    const field = (label, f) => `<label style="display:flex;flex-direction:column;gap:4px;min-width:0"><span style="${small}">${label}</span><select data-f="${f}"></select></label>`;
-    bar.innerHTML = `
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px 16px;align-items:end">
-        ${field('Färdsätt', 'mode')}${field('Pendling till', 'dest')}${field('Max restid', 'max')}${field('Över gränsen', 'over')}
-        <button type="button" data-f="sort" aria-pressed="false"><span aria-hidden="true">↕</span>Sortera efter pendling</button>
-      </div>
-      <div data-f="info" style="${small};margin-top:8px"></div>`;
-    bar.querySelector('[data-f="max"]').innerHTML = `<option value="0">Alla</option>${LIST_MAXES.map((m) => `<option value="${m}">${m} min</option>`).join('')}`;
-    bar.querySelector('[data-f="over"]').innerHTML = '<option value="dim">Tona ner</option><option value="hide">Dölj</option>';
-    bar.querySelector('[data-f="mode"]').innerHTML = '<option value="transit">Kollektivt</option><option value="car">Bil</option>';
-    const update = (fn) => {
-      const c = cfg();
-      c.list = fn({ ...c.list });
-      saveCfg(c);
-      decorateCards();
-    };
-    bar.addEventListener('change', (e) => {
-      const f = e.target.dataset.f;
-      if (f === 'dest') update((l) => ({ ...l, dest: e.target.value }));
-      if (f === 'mode') update((l) => ({ ...l, mode: e.target.value }));
-      if (f === 'max') update((l) => ({ ...l, max: +e.target.value }));
-      if (f === 'over') update((l) => ({ ...l, over: e.target.value }));
-    });
-    bar.addEventListener('click', (e) => {
-      if (!e.target.closest('[data-f="sort"]')) return;
-      e.preventDefault();
-      update((l) => ({ ...l, sort: !l.sort }));
-    });
-    return bar;
+  // What the lists can show: "Mina resmål" when some of yours have a table, then every published destination.
+  function destOptions(c) {
+    const mine = myTables(c);
+    return [...(mine.length ? [['mine', `Mina resmål (${mine.map((m) => m.label).join(', ')})`]] : []), ...tableIndex().map((m) => [m.key, m.label])];
+  }
+  const currentDest = (c, ts, opts) => (opts.some(([v]) => v === c.list.dest) ? c.list.dest : ts.length === 1 ? ts[0].meta.key : opts[0][0]);
+  function updateList(fn) {
+    const c = cfg();
+    c.list = fn({ ...c.list });
+    saveCfg(c);
+    decorateCards();
   }
 
-  // Put the bar under Booli's Sökfilter row (or above the list), and keep its controls looking like Booli's.
-  function placeFilterBar(c, box) {
-    if (!filterBar) filterBar = makeFilterBar();
+  // ---------- one summary line under Sökfilter ----------
+  // The controls live in Booli's Sökfilter panel; on the page there is only a line saying what's active, since
+  // Booli's own filter count doesn't include it, with a link that opens Sökfilter.
+  function placeSummary(c, ts, box, counts) {
+    if (!filterBar) {
+      filterBar = document.createElement('p');
+      filterBar.setAttribute('data-bcs-filter', '');
+      filterBar.style.cssText = 'margin:0;font-size:14px;line-height:1.4;color:#5c5c5a;';
+      filterBar.addEventListener('click', (e) => {
+        if (!e.target.closest('[data-act="open"]')) return;
+        e.preventDefault();
+        const ctl = booliControls();
+        if (ctl) ctl.filter.click(); else openSettings();
+      });
+    }
     const ctl = booliControls();
-    if (ctl) {
-      if (ctl.row.nextElementSibling !== filterBar) ctl.row.after(filterBar);
-    } else if (filterBar.nextElementSibling !== box) box.before(filterBar);
-    // Spacing: the parent's own gap if it has one, else the same space as above Booli's row.
-    const parent = filterBar.parentElement;
-    const pcs = getComputedStyle(parent);
+    if (ctl) { if (ctl.row.nextElementSibling !== filterBar) ctl.row.after(filterBar); }
+    else if (filterBar.nextElementSibling !== box) box.before(filterBar);
+    const parent = filterBar.parentElement, pcs = getComputedStyle(parent);
     const gap = /flex|grid/.test(pcs.display) && parseFloat(pcs.rowGap) > 0;
-    const prev = ctl && ctl.row.previousElementSibling;
-    const above = prev ? ctl.row.getBoundingClientRect().top - prev.getBoundingClientRect().bottom : 0;
-    setStyle(filterBar, 'margin', gap ? '0' : `${above > 0 ? Math.round(above) : 24}px 0 ${ctl ? 0 : 16}px`);
-    const off = lookOf(ctl && ctl.filter) || FALLBACK_LOOK;
-    const on = lookOf(ctl && ctl.save) || { ...off, color: '#fff', bg: '#1b1b1b', border: '1px solid #1b1b1b' };
-    const selectStyle = { ...lookStyle(off), width: '100%', appearance: 'none', '-webkit-appearance': 'none', 'padding-right': '44px',
-      'background-image': CHEVRON_BG, 'background-repeat': 'no-repeat', 'background-position': 'right 16px center' };
-    for (const sel of filterBar.querySelectorAll('select')) applyStyle(sel, selectStyle);
-    applyStyle(filterBar.querySelector('[data-f="sort"]'), { ...lookStyle(c.list.sort ? on : off), display: 'inline-flex', 'align-items': 'center',
-      'justify-content': 'center', gap: '.4em', width: '100%', 'white-space': 'nowrap' });
+    setStyle(filterBar, 'margin', gap ? '0' : `12px 0 ${ctl ? 0 : 16}px`);
+    const max = +c.list.max || 0;
+    const to = ts.length === 1 ? ts[0].meta.label : 'dina resmål';
+    const how = carMode(c) ? 'med bil' : 'kollektivt';
+    const text = max
+      ? `Pendling: högst ${max} min ${how} till ${to}${counts ? ` · ${counts}` : ''}${mapHooked ? ' · lila på kartan är över gränsen' : ''}${c.list.sort ? ' · sorterad efter pendling' : ''}.`
+      : `Restid ${how} till ${to} visas på varje bostad${c.list.sort ? ', sorterad efter pendling' : ''}.`;
+    const html = `${esc(text)} <a href="#" data-act="open" style="color:inherit;font-weight:600;text-decoration:underline;text-underline-offset:3px">${max ? 'Ändra' : 'Sätt en gräns'} under Sökfilter</a>`;
+    if (filterBar._html !== html) { filterBar._html = html; filterBar.innerHTML = html; }
+  }
+
+  // ---------- a section in Booli's Sökfilter panel ----------
+  // Built from copies of the panel's own parts, so it looks and works like the rest: the "Bostadstyp" heading,
+  // its tiles (with the look of a chosen and an unchosen one), and the "Antal rum" fields with their two columns.
+  // The parts are found by their texts. If a part isn't there, a plain stand-in with the same look is used.
+  const TYPE_TILES = /^(Lägenhet|Villa|Par\/rad\/kedjehus|Fritidshus|Gård|Tomt\/mark)$/;
+  // The innermost element (the root itself included) whose text matches.
+  const leafWith = (root, re) => [root, ...root.querySelectorAll('*')].find((el) => re.test(el.textContent.trim()) && ![...el.children].some((ch) => re.test(ch.textContent.trim())));
+  const tileOn = (el) => ['aria-pressed', 'aria-checked', 'aria-selected'].some((a) => el.getAttribute(a) === 'true') ||
+    /^(on|checked|active)$/.test(el.getAttribute('data-state') || '') || !!el.querySelector('input:checked');
+  const lca = (els) => { let a = els[0].parentElement; while (a && !els.every((e) => a.contains(e))) a = a.parentElement; return a; };
+  const childOf = (parent, el) => { while (el && el.parentElement !== parent) el = el.parentElement; return el; };
+  const stripIds = (el) => { el.removeAttribute('id'); el.querySelectorAll('[id]').forEach((n) => n.removeAttribute('id')); return el; };
+
+  function findFilterPanel() {
+    const head = [...document.querySelectorAll('h1, h2, h3, h4, h5, h6, legend, p, span, div')]
+      .find((el) => el.textContent.trim() === 'Bostadstyp' && !el.closest('[data-bcs-panel]') && ![...el.children].some((ch) => ch.textContent.trim() === 'Bostadstyp'));
+    if (!head) return null;
+    let sec = head;
+    while (sec.parentElement && sec.parentElement !== document.body && !/Antal rum/.test(sec.parentElement.textContent)) sec = sec.parentElement;
+    const list = sec.parentElement;
+    if (!list || list === document.body) return null;
+    const tiles = [...sec.querySelectorAll('button, label, [role="button"], [role="checkbox"], [role="radio"], a')]
+      .filter((b) => TYPE_TILES.test(b.textContent.trim()) && !b.parentElement.closest('button, label, [role="button"], [role="checkbox"], [role="radio"]'));
+    if (!tiles.length) return null;
+    const roomsSec = childOf(list, leafWith(list, /^Antal rum$/));
+    const selects = roomsSec ? [...roomsSec.querySelectorAll('select')] : [];
+    const area = childOf(list, leafWith(list, /^Utöka sökområde$/));
+    return { head, sec, list, tiles, roomsSec, selects, area };
+  }
+
+  function buildPanelSection(p) {
+    const section = stripIds(p.sec.cloneNode(false));
+    section.setAttribute('data-bcs-panel', '');
+    // Heading: the Bostadstyp heading, and whatever wraps it in the section, with new text.
+    const headItem = childOf(p.sec, p.head);
+    const head = stripIds(headItem.cloneNode(true));
+    leafWith(head, /^Bostadstyp$/).textContent = 'Pendling';
+    section.appendChild(head);
+    // Tiles: on and off looks from Booli's own tiles.
+    const onTile = p.tiles.find(tileOn), offTile = p.tiles.find((t) => !tileOn(t)) || p.tiles[0];
+    const tileGrid = lca(p.tiles.length > 1 ? p.tiles : [p.tiles[0], p.tiles[0]]) || p.tiles[0].parentElement;
+    const tile = (f, v, icon, label) => {
+      const item = stripIds(childOf(tileGrid, offTile).cloneNode(true));
+      const t = item.matches('button, label, [role], a') ? item : item.querySelector('button, label, [role], a') || item;
+      t.querySelectorAll('input').forEach((i) => i.remove());
+      const icons = t.querySelectorAll('svg, img');
+      icons.forEach((x, k) => { if (k) x.remove(); });
+      if (icons[0]) { const sp = document.createElement('span'); sp.setAttribute('aria-hidden', 'true'); sp.style.fontSize = '1.25em'; sp.textContent = icon; icons[0].replaceWith(sp); }
+      leafWith(t, TYPE_TILES).textContent = label;
+      t.setAttribute('data-f', f);
+      if (v) t.setAttribute('data-v', v);
+      t.setAttribute('role', 'button');
+      t._on = onTile ? { cls: onTile.className, style: onTile.getAttribute('style') || '' } : null;
+      t._off = { cls: offTile.className, style: offTile.getAttribute('style') || '' };
+      return item;
+    };
+    const grid = (items, cols) => {
+      const g = stripIds(tileGrid.cloneNode(false));
+      if (cols) g.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
+      items.forEach((x) => g.appendChild(x));
+      return g;
+    };
+    const modeRow = grid([tile('mode', 'transit', '🚆', 'Kollektivt'), tile('mode', 'car', '🚗', 'Bil')], 2);
+    modeRow.setAttribute('data-bcs-row', 'mode');
+    section.appendChild(modeRow);
+    // Fields: Booli's "Minst / Upp till" fields and their two-column layout, with our selects.
+    const sel = p.selects[0];
+    const fieldOf = (s) => { let f = s; while (f.parentElement && f.parentElement !== p.roomsSec && f.parentElement.querySelectorAll('select').length === 1) f = f.parentElement; return f; };
+    const field = (label, f, full) => {
+      let el;
+      if (sel) {
+        el = stripIds(fieldOf(sel).cloneNode(true));
+        const lab = leafWith(el, /^(Minst|Upp till)$/);
+        if (lab) { lab.textContent = label; lab.removeAttribute('for'); }
+        const s2 = el.querySelector('select');
+        s2.setAttribute('data-f', f);
+        s2.removeAttribute('name');
+        s2.innerHTML = '';
+      } else { // stand-in, styled like the Sökfilter button
+        el = document.createElement('label');
+        el.style.cssText = 'display:flex;flex-direction:column;gap:6px;min-width:0';
+        el.innerHTML = `<span>${esc(label)}</span><select data-f="${f}"></select>`;
+        const look = lookOf(booliControls() && booliControls().filter) || FALLBACK_LOOK;
+        applyStyle(el.querySelector('select'), { ...lookStyle(look), width: '100%', appearance: 'none', '-webkit-appearance': 'none',
+          'padding-right': '44px', 'background-image': CHEVRON_BG, 'background-repeat': 'no-repeat', 'background-position': 'right 16px center' });
+      }
+      if (full) el.style.gridColumn = '1 / -1';
+      return el;
+    };
+    const pair = sel ? lca(p.selects.length > 1 ? p.selects.map(fieldOf) : [fieldOf(sel), fieldOf(sel)]) : null;
+    const fields = pair && pair !== p.roomsSec ? stripIds(pair.cloneNode(false)) : document.createElement('div');
+    if (!pair || pair === p.roomsSec) fields.style.cssText = 'display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px';
+    fields.style.marginTop = '16px';
+    fields.append(field('Pendling till', 'dest', true), field('Max restid', 'max'), field('Över gränsen', 'over'));
+    section.appendChild(fields);
+    const sortRow = grid([tile('sort', '', '↕', 'Sortera efter pendling')], 1);
+    sortRow.style.marginTop = '16px';
+    section.appendChild(sortRow);
+    section.querySelector('[data-f="max"]').innerHTML = `<option value="0">Visa allt</option>${LIST_MAXES.map((m) => `<option value="${m}">${m} min</option>`).join('')}`;
+    section.querySelector('[data-f="over"]').innerHTML = '<option value="dim">Tona ner</option><option value="hide">Dölj</option>';
+    // Booli's panel may listen for clicks on its parts: keep ours to ourselves.
+    section.addEventListener('click', (e) => {
+      const t = e.target.closest('[data-f="mode"], [data-f="sort"]');
+      if (!t) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (t.dataset.f === 'mode') updateList((l) => ({ ...l, mode: t.dataset.v }));
+      else updateList((l) => ({ ...l, sort: !l.sort }));
+    }, true);
+    section.addEventListener('change', (e) => {
+      const f = e.target.dataset.f;
+      e.stopPropagation();
+      if (f === 'dest') updateList((l) => ({ ...l, dest: e.target.value }));
+      if (f === 'max') updateList((l) => ({ ...l, max: +e.target.value }));
+      if (f === 'over') updateList((l) => ({ ...l, over: e.target.value }));
+    }, true);
+    return section;
+  }
+
+  const setTile = (t, on) => {
+    const look = on ? t._on : t._off;
+    t.setAttribute('aria-pressed', String(on));
+    if (look) {
+      if (t.className !== look.cls) t.className = look.cls;
+      if ((t.getAttribute('style') || '') !== look.style) t.setAttribute('style', look.style);
+    } else { // Booli showed no chosen tile to copy: mark it like one
+      setStyle(t, 'background-color', '#f0f0f0');
+      setStyle(t, 'border-color', '#1b1b1b');
+    }
+    if (!on && !t._on) { setStyle(t, 'background-color', ''); setStyle(t, 'border-color', ''); }
+  };
+
+  let panelSection = null;
+  function decoratePanel(c) {
+    const p = findFilterPanel();
+    if (!p) return;
+    if (!panelSection || !p.list.contains(panelSection)) {
+      try { panelSection = buildPanelSection(p); } catch { panelSection = null; return; }
+      // After "Utöka sökområde", else first.
+      if (p.area) p.area.after(panelSection); else p.list.insertBefore(panelSection, p.list.firstElementChild);
+    }
+    const q = (f) => panelSection.querySelector(`select[data-f="${f}"]`);
+    const ts = tablesFor(c);
+    const opts = destOptions(c);
+    const sig = JSON.stringify(opts);
+    if (q('dest')._sig !== sig) { q('dest')._sig = sig; q('dest').innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join(''); }
+    const dest = currentDest(c, ts, opts);
+    if (q('dest').value !== dest) q('dest').value = dest;
+    const max = String(+c.list.max || 0);
+    if (q('max').value !== max) q('max').value = max;
+    if (q('over').value !== c.list.over) q('over').value = c.list.over;
+    q('over').disabled = !+max;
+    const modeRow = panelSection.querySelector('[data-bcs-row="mode"]');
+    if (modeRow.hidden === hasCar()) modeRow.hidden = !hasCar(); // only once driving times exist
+    const car = carMode(c);
+    panelSection.querySelectorAll('[data-f="mode"]').forEach((t) => setTile(t, (t.dataset.v === 'car') === car));
+    setTile(panelSection.querySelector('[data-f="sort"]'), !!c.list.sort);
   }
 
   // The list itself: the deepest element holding most of the cards, so a stray card elsewhere on the page
@@ -2011,28 +2156,7 @@
   function filterList(cards, c, ts) {
     const box = listBox(cards);
     if (!box || box === document.body || box === document.documentElement) return;
-    placeFilterBar(c, box);
     const max = +c.list.max || 0;
-    const q = (f) => filterBar.querySelector(`[data-f="${f}"]`);
-    // Destinations: "Mina resmål" when some of yours have a table, then every published table.
-    const mine = myTables(c);
-    const opts = [...(mine.length ? [['mine', `Mina resmål (${mine.map((m) => m.label).join(', ')})`]] : []), ...tableIndex().map((m) => [m.key, m.label])];
-    const optsSig = JSON.stringify(opts);
-    if (q('dest')._sig !== optsSig) {
-      q('dest')._sig = optsSig;
-      q('dest').innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('');
-    }
-    const dest = opts.some(([v]) => v === c.list.dest) ? c.list.dest : ts.length === 1 ? ts[0].meta.key : opts[0][0];
-    if (q('dest').value !== dest) q('dest').value = dest;
-    if (q('max').value !== String(max)) q('max').value = String(max);
-    if (q('over').value !== c.list.over) q('over').value = c.list.over;
-    q('over').disabled = !max;
-    // Färdsätt only once driving times exist.
-    const modeField = q('mode').closest('label');
-    if (modeField.hidden === hasCar()) modeField.hidden = !hasCar();
-    const mode = carMode(c) ? 'car' : 'transit';
-    if (q('mode').value !== mode) q('mode').value = mode;
-    q('sort').setAttribute('aria-pressed', String(!!c.list.sort));
 
     const rows = cards.filter((x) => box.contains(x.card)).map((x, i) => ({ ...x, item: itemIn(box, x.card), i })).filter((r) => r.item);
     let over = 0;
@@ -2044,11 +2168,9 @@
       setStyle(r.item, 'opacity', mode === 'dim' ? '0.35' : '');
       if (mode) r.item.dataset.bcsF = mode; else delete r.item.dataset.bcsF;
     }
-    const counts = !max ? '' : over === 0 ? `Alla ${rows.length} inom ${max} min` : c.list.over === 'hide'
-      ? `Visar ${rows.length - over} av ${rows.length}` : `${over} av ${rows.length} över ${max} min`;
-    const info = counts && mapHooked ? `${counts}. På kartan är det lila området över ${max} min.` : counts;
-    if (q('info').textContent !== info) q('info').textContent = info;
-    q('info').hidden = !info;
+    const counts = !max ? '' : over === 0 ? `alla ${rows.length} inom gränsen` : c.list.over === 'hide'
+      ? `visar ${rows.length - over} av ${rows.length}` : `${over} av ${rows.length} över gränsen`;
+    placeSummary(c, ts, box, counts);
 
     if (c.list.sort) {
       if (!box.dataset.bcsSort) {
@@ -3469,6 +3591,11 @@ self.onmessage = (e) => {
       cardsFound: cards.length,
       positionsKnown: cards.filter((x) => knownPos(x.id)).length,
       estimates: cards.slice(0, 5).map((x) => ({ id: x.id, pos: knownPos(x.id), text: [...x.line.querySelectorAll('[data-bcs-est]')].map((e) => e.textContent).join(' · ') || null })),
+      filterPanel: (() => {
+        const p = findFilterPanel();
+        return p ? { tiles: p.tiles.length, selects: p.selects.length, areaSection: !!p.area, inserted: !!document.querySelector('[data-bcs-panel]'),
+          typeSectionHtml: p.sec.outerHTML.slice(0, 2500), roomsSectionHtml: p.roomsSec ? p.roomsSec.outerHTML.slice(0, 2500) : null } : 'Sökfilter är inte öppet';
+      })(),
       filterBar: (() => {
         const bar = document.querySelector('[data-bcs-filter]');
         if (!bar) return null;

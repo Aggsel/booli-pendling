@@ -184,16 +184,17 @@ function carTableFixture() {
 test('by car: Färdsätt appears once driving times exist, and Bil switches every card to them', () => {
   const CAR = carTableFixture();
   const carIndex = { t: Date.now(), v: '9.9.9', data: { version: 1, tables: [{ ...meta(TABLE), carGenerated: CAR.generated }] } };
-  const plain = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml, store: STORE });
-  assert.equal(plain.w.document.querySelector('[data-f="mode"]').closest('label').hidden, true, 'no driving times yet');
+  const plain = load({ url: 'https://www.booli.se/sok/till-salu', body: PANEL + pageHtml, store: STORE });
+  assert.equal(plain.w.document.querySelector('[data-bcs-row="mode"]').hidden, true, 'no driving times yet');
 
-  const { w, values } = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml,
+  const { w, values } = load({ url: 'https://www.booli.se/sok/till-salu', body: PANEL + pageHtml,
     store: { ...STORE, 'table:index': carIndex, 'table:car:gbg-c': { t: Date.now(), data: CAR } } });
-  const doc = w.document, sel = doc.querySelector('[data-f="mode"]');
-  assert.equal(sel.closest('label').hidden, false);
-  sel.value = 'car';
-  sel.dispatchEvent(new w.Event('change', { bubbles: true }));
+  const doc = w.document;
+  assert.equal(doc.querySelector('[data-bcs-row="mode"]').hidden, false);
+  assert.deepEqual([...doc.querySelectorAll('[data-bcs-panel] [data-f="mode"]')].map((x) => x.textContent.trim()), ['🚆Kollektivt', '🚗Bil']);
+  doc.querySelector('[data-bcs-panel] [data-f="mode"][data-v="car"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
   assert.equal(values.get('config').list.mode, 'car');
+  assert.equal(doc.querySelector('[data-bcs-panel] [data-f="mode"][data-v="car"]').className, 'tile tile-on');
   for (const l of listings) {
     const want = Math.round(Math.hypot((l.lat - 57.7089) * 111.2, (l.lon - 11.9735) * 59.5) * 1.5 + 3);
     const m = /^ca (\d+) min med bil till Göteborg C$/.exec(est(doc, l.id).textContent.trim());
@@ -260,6 +261,20 @@ const listHtml = () => `<ul id="list">${listings.map(card).join('')}</ul>`;
 const pageHtml = `<main>${listHtml()}</main><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
   props: { pageProps: { search: { result: listings.map((l) => ({ booliId: l.id, location: { position: { latitude: l.lat, longitude: l.lon } } })) } } },
 })}</script>`;
+// Booli's Sökfilter panel, roughly as it looks: sections with a heading; tiles for Bostadstyp (Villa chosen);
+// Antal rum with two labelled selects side by side.
+const PANEL = `<div id="sokfilter"><h2>Sökfilter</h2><div class="sections">
+  <section class="sec"><h3 class="sec-h">Utöka sökområde</h3><div class="w"><select class="sel"><option>0 km</option></select></div></section>
+  <section class="sec"><h3 class="sec-h">Bostadstyp</h3><div class="tiles">
+    <button class="tile" aria-pressed="false"><svg class="ico"></svg><span>Lägenhet</span></button>
+    <button class="tile tile-on" aria-pressed="true"><svg class="ico"></svg><span>Villa</span></button>
+    <button class="tile" aria-pressed="false"><svg class="ico"></svg><span>Gård</span></button></div></section>
+  <section class="sec"><h3 class="sec-h">Antal rum</h3><div class="pair">
+    <div class="f"><label class="lab">Minst</label><div class="w"><select class="sel" name="minRooms"><option>Visa allt</option></select><svg></svg></div></div>
+    <div class="f"><label class="lab">Upp till</label><div class="w"><select class="sel" name="maxRooms"><option>Visa allt</option></select><svg></svg></div></div>
+  </div></section>
+</div></div>`;
+const ctl = (doc, f) => doc.querySelector(`[data-bcs-panel] [data-f="${f}"]`);
 const est = (doc, id, key = 'gbg-c') => doc.querySelector(`[data-bcs-est="${id}:${key}"]`);
 const item = (doc, id) => est(doc, id).closest('li');
 
@@ -281,15 +296,14 @@ test('result list: every card shows an estimate at once, without a key and witho
 });
 
 test('filter hides or dims exactly the cards over the limit, sorting reorders them, and both survive a redraw', async () => {
-  const { w, api, values, close } = load({ url: 'https://www.booli.se/sok/till-salu?areaIds=22', body: pageHtml, store: STORE });
+  const { w, api, values, close } = load({ url: 'https://www.booli.se/sok/till-salu?areaIds=22', body: PANEL + pageHtml, store: STORE });
   const doc = w.document;
   const t = api.indexTable(TABLE), c = api.cfg();
   const mins = Object.fromEntries(listings.map((l) => [l.id, (api.estimate(l, c, t) || {}).mins]));
   const over = listings.filter((l) => mins[l.id] > 40).map((l) => l.id);
   assert.ok(over.length > 0 && over.length < N, 'the test data has listings on both sides of 40 min');
 
-  const bar = doc.querySelector('[data-bcs-filter]');
-  const sel = (f) => bar.querySelector(`[data-f="${f}"]`);
+  const sel = (f) => ctl(doc, f);
   sel('over').value = 'hide';
   sel('over').dispatchEvent(new w.Event('change', { bubbles: true }));
   sel('max').value = '40';
@@ -507,10 +521,10 @@ test('listings without a position stay visible and say "pendling okänd"', async
 
 test('resmål without a table: the list shows the first published destination instead of the button', () => {
   const store = { ...STORE, config: { apiKey: 'k', destinations: [{ name: 'Partille station', id: '1', lat: 57.74107, lon: 12.10366 }] } };
-  const { w } = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml, store });
+  const { w } = load({ url: 'https://www.booli.se/sok/till-salu', body: PANEL + pageHtml, store });
   assert.equal(w.document.querySelectorAll('[data-bcs-est$=":gbg-c"]').length, N);
   assert.equal(w.document.querySelectorAll('[data-bcs-btn]').length, 0);
-  assert.equal(w.document.querySelector('[data-f="dest"]').value, 'gbg-c');
+  assert.equal(ctl(w.document, 'dest').value, 'gbg-c');
 });
 
 test('list estimates switched off: the old button comes back (with a key)', () => {
@@ -521,10 +535,10 @@ test('list estimates switched off: the old button comes back (with a key)', () =
   assert.equal(w.document.querySelector('[data-bcs-filter]'), null);
 });
 
-test('choosing a destination in the bar switches every card to that table', () => {
+test('choosing a destination in Sökfilter switches every card to that table', () => {
   const store = { ...STORE, 'table:index': INDEX(TABLE, LINDHOLMEN), 'table:lindholmen': { t: Date.now(), data: LINDHOLMEN } };
-  const { w, api, values } = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml, store });
-  const doc = w.document, sel = doc.querySelector('[data-f="dest"]');
+  const { w, api, values } = load({ url: 'https://www.booli.se/sok/till-salu', body: PANEL + pageHtml, store });
+  const doc = w.document, sel = ctl(doc, 'dest');
   assert.deepEqual([...sel.options].map((o) => o.textContent), ['Mina resmål (Göteborg C)', 'Göteborg C', 'Lindholmen']);
   sel.value = 'lindholmen';
   sel.dispatchEvent(new w.Event('change', { bubbles: true }));
@@ -534,18 +548,43 @@ test('choosing a destination in the bar switches every card to that table', () =
   assert.equal(doc.querySelectorAll('[data-bcs-est$=":gbg-c"]').length, 0);
 });
 
-test('the bar sits under Booli\'s Sökfilter row and copies its buttons\' look', () => {
-  const head = `<div id="head"><div id="search"></div><div id="row"><button style="height:56px;border:1px solid rgb(10, 20, 30);border-radius:6px;font-size:18px"><svg></svg><span>Sökfilter</span><span>1</span></button>
-    <button style="background-color:rgb(27, 27, 27);color:rgb(255, 255, 255)">Spara sökning</button></div><p>Villor till salu</p></div>`;
-  const { w } = load({ url: 'https://www.booli.se/sok/till-salu', body: head + pageHtml, store: STORE });
-  const doc = w.document, bar = doc.querySelector('[data-bcs-filter]');
-  assert.equal(bar.previousElementSibling.id, 'row');
-  const sel = bar.querySelector('select');
-  assert.equal(sel.style.height, '56px');
-  assert.equal(sel.style.borderRadius, '6px');
-  assert.equal(sel.style.fontSize, '18px');
-  bar.querySelector('[data-f="sort"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  assert.equal(bar.querySelector('[data-f="sort"]').style.backgroundColor, 'rgb(27, 27, 27)'); // "on" looks like Spara sökning
+test('the controls are a section in Booli\'s Sökfilter panel, built from its own parts', () => {
+  const { w, values } = load({ url: 'https://www.booli.se/sok/till-salu', body: PANEL + pageHtml, store: STORE });
+  const doc = w.document, section = doc.querySelector('[data-bcs-panel]');
+  // After "Utöka sökområde", with Booli's own classes.
+  assert.equal(section.previousElementSibling.querySelector('h3').textContent, 'Utöka sökområde');
+  assert.equal(section.className, 'sec');
+  assert.equal(section.querySelector('h3.sec-h').textContent, 'Pendling');
+  const labels = [...section.querySelectorAll('label.lab')].map((l) => l.textContent);
+  assert.deepEqual(labels, ['Pendling till', 'Max restid', 'Över gränsen']);
+  assert.ok([...section.querySelectorAll('select')].every((s) => s.className === 'sel' && !s.name));
+  assert.equal(section.querySelector('.pair').children.length, 3);
+  // The sort tile: off looks like an unchosen Bostadstyp tile, on like the chosen one (Villa).
+  const sort = ctl(doc, 'sort');
+  assert.equal(sort.className, 'tile');
+  assert.equal(sort.textContent.includes('Sortera efter pendling'), true);
+  sort.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  assert.equal(values.get('config').list.sort, true);
+  assert.equal(ctl(doc, 'sort').className, 'tile tile-on');
+  assert.equal(ctl(doc, 'sort').getAttribute('aria-pressed'), 'true');
+  // Booli's own parts are untouched.
+  assert.equal(doc.querySelectorAll('[data-bcs-panel]').length, 1);
+  assert.equal(doc.querySelector('.sec:not([data-bcs-panel]) button.tile-on span').textContent, 'Villa');
+});
+
+test('on the page, one line under Sökfilter says what is active and opens Sökfilter', () => {
+  const head = `<div id="head"><div id="row"><button id="sf"><svg></svg><span>Sökfilter</span><span>1</span></button>
+    <button>Spara sökning</button></div><p>Villor till salu</p></div>`;
+  const store = { ...STORE, config: { list: { dest: 'mine', max: 40, over: 'dim', sort: false } } };
+  const { w } = load({ url: 'https://www.booli.se/sok/till-salu', body: head + pageHtml, store });
+  const doc = w.document, line = doc.querySelector('[data-bcs-filter]');
+  assert.equal(line.previousElementSibling.id, 'row');
+  assert.match(line.textContent, /^Pendling: högst 40 min kollektivt till Göteborg C · \d+ av 32 över gränsen\. Ändra under Sökfilter$/);
+  assert.equal(doc.querySelectorAll('select[data-f]').length, 0, 'no controls on the page itself');
+  let opened = 0;
+  doc.getElementById('sf').addEventListener('click', () => opened++);
+  line.querySelector('[data-act="open"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  assert.equal(opened, 1);
 });
 
 test('two resmål with tables: one estimate each, and the filter uses the longest', () => {
@@ -556,7 +595,7 @@ test('two resmål with tables: one estimate each, and the filter uses the longes
       list: { dest: 'mine', max: 40, over: 'hide', sort: false },
     },
   };
-  const { w, api, requests } = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml, store });
+  const { w, api, requests } = load({ url: 'https://www.booli.se/sok/till-salu', body: PANEL + pageHtml, store });
   const doc = w.document, c = api.cfg();
   const [tc, tl] = [api.indexTable(TABLE), api.indexTable(LINDHOLMEN)];
   for (const l of listings) {
@@ -566,8 +605,8 @@ test('two resmål with tables: one estimate each, and the filter uses the longes
     const over = a && b && Math.max(a.mins, b.mins) > 40;
     assert.equal(item(doc, l.id).style.display === 'none', !!over, `listing ${l.id}`);
   }
-  assert.equal(doc.querySelector('[data-f="dest"]').value, 'mine');
-  assert.equal(doc.querySelector('[data-f="dest"]').selectedOptions[0].textContent, 'Mina resmål (Göteborg C, Lindholmen)');
+  assert.equal(ctl(doc, 'dest').value, 'mine');
+  assert.equal(ctl(doc, 'dest').selectedOptions[0].textContent, 'Mina resmål (Göteborg C, Lindholmen)');
   assert.deepEqual(requests, []);
 });
 
