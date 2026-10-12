@@ -158,6 +158,12 @@ test('filter hides or dims exactly the cards over the limit, sorting reorders th
   close();
 });
 
+test('a stray card elsewhere on the page does not move the filter bar away from the list', () => {
+  const body = `<header><div class="carousel">${card({ id: 999100 })}</div></header>${pageHtml}`;
+  const { w } = load({ url: 'https://www.booli.se/sok/till-salu?areaIds=22', body, store: STORE });
+  assert.equal(w.document.querySelector('[data-bcs-filter]').nextElementSibling.id, 'list');
+});
+
 test('listings without a position stay visible and say "pendling okänd"', async () => {
   const body = `<main><ul id="list">${card({ id: 999001 })}${card({ id: 999002 })}</ul></main>`;
   const { w, close } = load({ url: 'https://www.booli.se/sok/till-salu', body, store: {

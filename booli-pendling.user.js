@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.6.0
+// @version      1.6.1
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -1861,11 +1861,21 @@
     return bar;
   }
 
-  const listBox = (cards) => {
-    let box = cards[0].card.parentElement;
-    while (box && !cards.every((x) => box.contains(x.card))) box = box.parentElement;
-    return box;
-  };
+  // The list itself: the deepest element holding most of the cards, so a stray card elsewhere on the page
+  // (a carousel, a map popup) doesn't move the bar out to some page-wide container.
+  function listBox(cards) {
+    const need = Math.max(1, Math.ceil(cards.length * 0.6));
+    const counts = new Map();
+    for (const x of cards) for (let el = x.card.parentElement; el && el !== document.body; el = el.parentElement) counts.set(el, (counts.get(el) || 0) + 1);
+    let best = null, bestDepth = -1;
+    for (const [el, n] of counts) {
+      if (n < need) continue;
+      let depth = 0;
+      for (let q = el; q; q = q.parentElement) depth++;
+      if (depth > bestDepth) { best = el; bestDepth = depth; }
+    }
+    return best;
+  }
   const itemIn = (box, el) => { while (el && el.parentElement !== box) el = el.parentElement; return el; };
   const setStyle = (el, prop, v) => { if (el.style[prop] !== v) el.style[prop] = v; };
 
@@ -1886,7 +1896,7 @@
     setStyle(q('sort'), 'background', c.list.sort ? '#1b1b1b' : '#fff');
     setStyle(q('sort'), 'color', c.list.sort ? '#fff' : '#1b1b1b');
 
-    const rows = cards.map((x, i) => ({ ...x, item: itemIn(box, x.card), i })).filter((r) => r.item);
+    const rows = cards.filter((x) => box.contains(x.card)).map((x, i) => ({ ...x, item: itemIn(box, x.card), i })).filter((r) => r.item);
     let over = 0;
     for (const r of rows) {
       const mode = max && r.est && r.est.mins > max ? c.list.over : '';
@@ -2786,7 +2796,14 @@
       cardsFound: cards.length,
       positionsKnown: cards.filter((x) => knownPos(x.id)).length,
       estimates: cards.slice(0, 5).map((x) => ({ id: x.id, pos: knownPos(x.id), text: [...x.line.querySelectorAll('[data-bcs-est]')].map((e) => e.textContent).join(' · ') || null })),
-      filterBar: !!document.querySelector('[data-bcs-filter]'),
+      filterBar: (() => {
+        const bar = document.querySelector('[data-bcs-filter]');
+        if (!bar) return null;
+        const desc = (el) => (el ? `${el.tagName.toLowerCase()}${el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).join('.') : ''}` : null);
+        const r = bar.getBoundingClientRect();
+        return { before: desc(bar.nextElementSibling), parent: desc(bar.parentElement), rect: [Math.round(r.left), Math.round(r.top + scrollY), Math.round(r.width), Math.round(r.height)],
+          visible: !!(r.width && r.height), cardsInList: bar.nextElementSibling ? cards.filter((x) => bar.nextElementSibling.contains(x.card)).length : 0 };
+      })(),
       sampleCardHtml: sample ? sample.outerHTML.slice(0, 3000) : null,
     };
     GM_setClipboard(JSON.stringify(debug, null, 2));
