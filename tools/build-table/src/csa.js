@@ -65,8 +65,8 @@ export function latestDepartures({ nStops, nTrips, cs, order, target, destStops,
 
 // Forward scans from the destination, one per evening departure time, latest first.
 // last[s] = the latest departure from the destination (from `from`, before `until`) that still reaches s
-// within `maxTrip` seconds, or -1.
-export function lastDepartures({ nStops, nTrips, cs, order, destStops, foot, changeTime, from, until, maxTrip }) {
+// within `maxTrip` seconds and by `arriveBy` (so waiting for the next morning's first trips doesn't count), or -1.
+export function lastDepartures({ nStops, nTrips, cs, order, destStops, foot, changeTime, from, until, maxTrip, arriveBy = Infinity }) {
   const origin = new Uint8Array(nStops);
   for (const d of destStops) { origin[d] = 1; for (const [nb] of foot[d] || []) origin[nb] = 1; }
   const dep = new Int32Array(order.length);
@@ -86,7 +86,7 @@ export function lastDepartures({ nStops, nTrips, cs, order, destStops, foot, cha
   for (const tau of [...taus].sort((a, b) => b - a)) {
     run++;
     for (const s of originStops) { ready[s] = tau; readyRun[s] = run; }
-    const end = tau + maxTrip;
+    const end = Math.min(tau + maxTrip, arriveBy);
     let lo = 0, hi = dep.length;
     while (lo < hi) { const mid = (lo + hi) >> 1; if (dep[mid] < tau) lo = mid + 1; else hi = mid; }
     for (let k = lo; k < order.length && dep[k] <= end; k++) {

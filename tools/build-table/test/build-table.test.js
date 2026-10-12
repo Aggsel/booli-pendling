@@ -46,6 +46,11 @@ test('last trip home after midnight (hours ≥ 24)', () => {
   assert.equal(n.min, 60);
 });
 
+test('a night trip that waits for the morning\'s first trips is not a last trip home', () => {
+  assert.equal(row('Beta station').last, '02:30'); // the 02:30 night bus itself gets there
+  assert.equal(row('Alfa station').last, null); // but not onwards with the 05:00 bus
+});
+
 test('calendar_dates exceptions add and remove service', () => {
   assert.equal(row('Helgby').min, 60); // T14 (removed) would have given 20
 });
