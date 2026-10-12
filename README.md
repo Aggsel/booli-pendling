@@ -6,7 +6,7 @@ Se restiden till jobbet direkt på Booli. Skriptet lägger till **Pendling** och
 - Sista resan hem på kvällen
 - Närmaste matbutik, skola och förskola, och körtid i rusning
 - Fungerar i hela Sverige
-- I sökresultaten: ungefärlig restid till dina resmål för varje bostad (just nu Göteborg C, Lindholmen och Gamlestaden), filter på längsta restid och sortering efter pendling. Det fungerar utan nyckel och gör inga anrop till Trafiklab.
+- I sökresultaten: ungefärlig restid för varje bostad till ett av tolv resmål (Göteborg C, Lindholmen, Gamlestaden, Chalmers, Sahlgrenska, Östra sjukhuset, Korsvägen, Mölndal, AstraZeneca Mölndal, Volvo Torslanda, Frölunda Torg och Landvetter flygplats) eller till dina egna, filter på längsta restid och sortering efter pendling. Det fungerar utan nyckel och gör inga anrop till Trafiklab.
 
 ## Installera
 
@@ -38,7 +38,7 @@ Körtid i rusning är en uppskattning. Närmaste skola betyder inte att ni får 
 
 ## Restidstabellen
 
-Listornas restider kommer från `data/travel-times-<resmål>.json`, en fil per resmål, och `data/tables.json` listar vilka som finns. GitHub Actions bygger dem varje måndag (`.github/workflows/travel-times.yml`) från Västtrafiks tidtabell, med skriptet i `tools/build-table/`: för varje hållplats den senaste avgången som är framme vid resmålet 08:00 en vanlig tisdag, och sista resan hem på kvällen. Skriptet använder tabellen för de resmål du har valt, om det finns en inom 500 m.
+Listornas restider kommer från `data/travel-times-<resmål>.json`, en fil per resmål, och `data/tables.json` listar vilka som finns. GitHub Actions bygger dem varje måndag (`.github/workflows/travel-times.yml`) från Västtrafiks tidtabell, med skriptet i `tools/build-table/`: för varje hållplats den senaste avgången som är framme vid resmålet 08:00 en vanlig tisdag, och sista resan hem på kvällen. I listorna väljer du resmål under Sökfilter. Mina resmål använder tabellerna för dina egna resmål, om det finns en inom 500 m.
 
 - Repot behöver hemligheten `GTFS_KEY` (nyckel för GTFS Regional från Trafiklab). Med `RESROBOT_KEY` jämförs tabellen också med ResRobot i jobbets logg.
 - Fler resmål läggs till i `tools/build-table/config.json`. Alla byggs från samma nedladdning av tidtabellen.

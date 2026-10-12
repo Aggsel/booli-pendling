@@ -6,7 +6,16 @@
   "destinations": [
     { "key": "gbg-c", "name": "Göteborg Centralstation", "label": "Göteborg C", "stopNamePattern": "^Göteborg Central$", "lat": 57.7089, "lon": 11.9735, "radius": 200 },
     { "key": "lindholmen", "name": "Lindholmen", "label": "Lindholmen", "stopNamePattern": "^Lindholmen$", "lat": 57.70814, "lon": 11.93809, "radius": 150 },
-    { "key": "gamlestaden", "name": "Gamlestaden Station", "label": "Gamlestaden", "stopNamePattern": "^Gamlestaden Station$", "lat": 57.72733, "lon": 12.00417, "radius": 150 }
+    { "key": "gamlestaden", "name": "Gamlestaden Station", "label": "Gamlestaden", "stopNamePattern": "^Gamlestaden Station$", "lat": 57.72733, "lon": 12.00417, "radius": 150 },
+    { "key": "chalmers", "name": "Chalmers", "label": "Chalmers", "stopNamePattern": "^Chalmers$", "lat": 57.69, "lon": 11.97295, "radius": 150 },
+    { "key": "sahlgrenska", "name": "Sahlgrenska Huvudentré", "label": "Sahlgrenska", "stopNamePattern": "^Sahlgrenska Huvudentré$", "lat": 57.68363, "lon": 11.96083, "radius": 150 },
+    { "key": "ostra-sjukhuset", "name": "Östra Sjukhuset", "label": "Östra sjukhuset", "stopNamePattern": "^Östra Sjukhuset$", "lat": 57.72227, "lon": 12.04815, "radius": 150 },
+    { "key": "korsvagen", "name": "Korsvägen", "label": "Korsvägen", "stopNamePattern": "^Korsvägen$", "lat": 57.69675, "lon": 11.98691, "radius": 150 },
+    { "key": "molndal", "name": "Mölndal station", "label": "Mölndal", "stopNamePattern": "^Mölndal station$", "lat": 57.65605, "lon": 12.01886, "radius": 150 },
+    { "key": "astrazeneca", "name": "AstraZeneca", "label": "AstraZeneca Mölndal", "stopNamePattern": "^AstraZeneca$", "lat": 57.64366, "lon": 12.01755, "radius": 150 },
+    { "key": "volvo-torslanda", "name": "Volvo Torslanda PVH", "label": "Volvo Torslanda", "stopNamePattern": "^Volvo Torslanda PVH$", "lat": 57.728, "lon": 11.86608, "radius": 150 },
+    { "key": "frolunda-torg", "name": "Frölunda Torg", "label": "Frölunda Torg", "stopNamePattern": "^Frölunda Torg$", "lat": 57.65221, "lon": 11.90979, "radius": 150 },
+    { "key": "landvetter", "name": "Landvetter flygplats", "label": "Landvetter flygplats", "stopNamePattern": "^Landvetter flygplats$", "lat": 57.66755, "lon": 12.29557, "radius": 150 }
   ],
   "spotCheck": [
     "Mölndal station", "Lindome station", "Kungsbacka station", "Partille station", "Lerum station", "Alingsås station", "Kungälv resecentrum", "Backa Kyrkogata", "Frölunda Torg", "Angered Centrum"

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.7.2
+// @version      1.8.0
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -144,7 +144,7 @@
     showTodayDelta: true,
     everyday: { grocery: { on: true, mode: 'bike' }, school: { on: true, mode: 'walk' }, car: { on: true } },
     destinations: [{ name: 'Göteborg Centralstation', id: '740000002', lat: 57.708895, lon: 11.973479, ...DEFAULT_DEST }],
-    list: { table: 'auto', max: 0, over: 'dim', sort: false }, // result lists: 'auto' (a table per resmål) or 'off', max minutes (0 = all)
+    list: { dest: 'mine', max: 0, over: 'dim', sort: false }, // result lists: 'mine', a table key or 'off'; max minutes (0 = all)
   };
 
   function cfg() {
@@ -153,6 +153,8 @@
     const c = Object.assign({}, DEFAULTS, saved);
     c.weights = Object.assign({}, DEFAULTS.weights, saved.weights || {});
     c.list = Object.assign({}, DEFAULTS.list, saved.list || {});
+    if (saved.list && saved.list.table === 'off' && !saved.list.dest) c.list.dest = 'off';
+    delete c.list.table;
     c.details = Object.assign({}, DEFAULTS.details, saved.details || {});
     c.everyday = {
       grocery: { ...DEFAULTS.everyday.grocery, ...((saved.everyday || {}).grocery || {}) },
@@ -706,14 +708,24 @@
   // Which published table belongs to a destination: the one whose stop is within 500 m of it.
   const tableMetaFor = (d) => (d && d.lat ? (tableNow('index') || TABLES).find((m) => haversineKm(d, m) < 0.5) || null : null);
 
-  // The tables for your resmål (only the main one with main = true), as [{ meta, t }].
-  // t is the table, or 'loading' while its first copy is on its way. Empty when list estimates are off.
-  function tablesFor(c, main = false) {
-    if (c.list.table === 'off') return [];
+  const tableIndex = () => tableNow('index') || TABLES;
+  // Your resmål that have a published table.
+  const myTables = (c) => {
     const out = [];
-    for (const d of main ? [mainDestOf(c)] : c.destinations) {
-      const meta = tableMetaFor(d);
-      if (!meta || out.some((x) => x.meta.key === meta.key)) continue;
+    for (const d of c.destinations) { const m = tableMetaFor(d); if (m && !out.includes(m)) out.push(m); }
+    return out;
+  };
+  // The tables the lists use, as [{ meta, t }]: the destination chosen in the filter bar, or "Mina resmål"
+  // (your resmål with a table, else the first published one). main = true: only your main resmål, for the
+  // placeholder before an exact value. t is the table, or 'loading' while its first copy is on its way.
+  function tablesFor(c, main = false) {
+    let metas;
+    if (main) metas = [tableMetaFor(mainDestOf(c))].filter(Boolean);
+    else if (c.list.dest === 'off') metas = [];
+    else if (c.list.dest && c.list.dest !== 'mine') metas = [tableIndex().find((m) => m.key === c.list.dest) || tableIndex()[0]];
+    else { metas = myTables(c); if (!metas.length) metas = [tableIndex()[0]]; }
+    const out = [];
+    for (const meta of metas) {
       const t = tableNow(meta.key);
       if (t) out.push({ meta, t });
       else if (!tablesFailed.has(meta.key)) out.push({ meta, t: 'loading' });
@@ -1830,21 +1842,55 @@
   }
 
   // ---------- filter bar ----------
-  const SELECT_CSS = 'font:inherit;font-size:14px;height:36px;padding:0 8px;margin-left:6px;border:1px solid #cfcecb;border-radius:8px;background:#fff;color:inherit;cursor:pointer;';
+  // A section under Booli's Sökfilter row. Its controls copy the look of Booli's own buttons.
+  const CHEVRON_BG = `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 20 20"><path d="M5 7.5l5 5 5-5" fill="none" stroke="#1b1b1b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>')}")`;
+  const FALLBACK_LOOK = { font: 'inherit', size: '16px', weight: '400', color: '#1b1b1b', bg: '#fff', border: '1px solid #cfcecb', radius: '6px', height: '48px', pad: '16px' };
   let filterBar = null;
 
+  // Booli's Sökfilter button, the "Spara sökning" button next to it, and the row holding both.
+  function booliControls() {
+    const buttons = [...document.querySelectorAll('button, a')].filter((b) => !b.closest('[data-bcs-filter]'));
+    const filter = buttons.find((b) => /^Sökfilter\b/.test(b.textContent.trim()));
+    if (!filter) return null;
+    const save = buttons.find((b) => /^Spara sökning/.test(b.textContent.trim()));
+    let row = filter.parentElement;
+    if (save) while (row && row !== document.body && !row.contains(save)) row = row.parentElement;
+    if (!row || row === document.body) row = filter.parentElement;
+    return { filter, save, row };
+  }
+  const lookOf = (el) => {
+    if (!el) return null;
+    const cs = getComputedStyle(el);
+    return { font: cs.fontFamily, size: cs.fontSize, weight: cs.fontWeight, color: cs.color, bg: cs.backgroundColor,
+      border: cs.borderTopWidth ? `${cs.borderTopWidth} ${cs.borderTopStyle} ${cs.borderTopColor}` : cs.border, radius: cs.borderTopLeftRadius || cs.borderRadius,
+      height: parseFloat(cs.height) > 0 ? cs.height : FALLBACK_LOOK.height, pad: parseFloat(cs.paddingLeft) > 0 ? cs.paddingLeft : FALLBACK_LOOK.pad };
+  };
+  const lookStyle = (l) => ({ 'box-sizing': 'border-box', 'font-family': l.font, 'font-size': l.size, 'font-weight': l.weight, color: l.color,
+    'background-color': l.bg, border: l.border, 'border-radius': l.radius, height: l.height, padding: `0 ${l.pad}`, margin: '0', cursor: 'pointer' });
+  // One property at a time, skipping empty ones, and only when something changed.
+  function applyStyle(el, style) {
+    const sig = JSON.stringify(style);
+    if (el._bcsStyle === sig) return;
+    el._bcsStyle = sig;
+    el.removeAttribute('style');
+    for (const [k, v] of Object.entries(style)) if (v && !/^\s|\s$|^0 $/.test(String(v))) el.style.setProperty(k, String(v));
+  }
+
   function makeFilterBar() {
-    const bar = document.createElement('div');
+    const bar = document.createElement('section');
     bar.setAttribute('data-bcs-filter', '');
-    bar.setAttribute('role', 'group');
-    bar.setAttribute('aria-label', 'Filtrera på pendling');
-    bar.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:8px 20px;margin:0 0 16px;font-size:14px;line-height:1.4;color:#1b1b1b;';
+    bar.setAttribute('aria-label', 'Pendling');
+    const field = (label, f) => `<label style="display:flex;flex-direction:column;gap:6px;min-width:0"><span>${label}</span><select data-f="${f}"></select></label>`;
     bar.innerHTML = `
-      <label><span data-l="max"></span><select data-f="max" style="${SELECT_CSS}">
-        <option value="0">Alla</option>${LIST_MAXES.map((m) => `<option value="${m}">${m} min</option>`).join('')}</select></label>
-      <label>Över gränsen<select data-f="over" style="${SELECT_CSS}"><option value="hide">Dölj</option><option value="dim">Tona ner</option></select></label>
-      <button type="button" data-f="sort" style="${BTN_CSS}margin-left:0;font-size:14px;height:36px;padding:0 14px;"><span aria-hidden="true">↕</span>Sortera efter pendling</button>
-      <span data-f="info" style="color:#5c5c5a"></span>`;
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px">
+        ${field('Pendling till', 'dest')}${field('Max restid', 'max')}${field('Över gränsen', 'over')}
+      </div>
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-top:16px">
+        <button type="button" data-f="sort" aria-pressed="false"><span aria-hidden="true">↕ </span>Sortera efter pendling</button>
+        <span data-f="info" style="opacity:.75"></span>
+      </div>`;
+    bar.querySelector('[data-f="max"]').innerHTML = `<option value="0">Alla</option>${LIST_MAXES.map((m) => `<option value="${m}">${m} min</option>`).join('')}`;
+    bar.querySelector('[data-f="over"]').innerHTML = '<option value="dim">Tona ner</option><option value="hide">Dölj</option>';
     const update = (fn) => {
       const c = cfg();
       c.list = fn({ ...c.list });
@@ -1853,6 +1899,7 @@
     };
     bar.addEventListener('change', (e) => {
       const f = e.target.dataset.f;
+      if (f === 'dest') update((l) => ({ ...l, dest: e.target.value }));
       if (f === 'max') update((l) => ({ ...l, max: +e.target.value }));
       if (f === 'over') update((l) => ({ ...l, over: e.target.value }));
     });
@@ -1862,6 +1909,28 @@
       update((l) => ({ ...l, sort: !l.sort }));
     });
     return bar;
+  }
+
+  // Put the bar under Booli's Sökfilter row (or above the list), and keep its controls looking like Booli's.
+  function placeFilterBar(c, box) {
+    if (!filterBar) filterBar = makeFilterBar();
+    const ctl = booliControls();
+    if (ctl) {
+      if (ctl.row.nextElementSibling !== filterBar) ctl.row.after(filterBar);
+    } else if (filterBar.nextElementSibling !== box) box.before(filterBar);
+    // Spacing: the parent's own gap if it has one, else the same space as above Booli's row.
+    const parent = filterBar.parentElement;
+    const pcs = getComputedStyle(parent);
+    const gap = /flex|grid/.test(pcs.display) && parseFloat(pcs.rowGap) > 0;
+    const prev = ctl && ctl.row.previousElementSibling;
+    const above = prev ? ctl.row.getBoundingClientRect().top - prev.getBoundingClientRect().bottom : 0;
+    setStyle(filterBar, 'margin', gap ? '0' : `${above > 0 ? Math.round(above) : 24}px 0 ${ctl ? 0 : 16}px`);
+    const off = lookOf(ctl && ctl.filter) || FALLBACK_LOOK;
+    const on = lookOf(ctl && ctl.save) || { ...off, color: '#fff', bg: '#1b1b1b', border: '1px solid #1b1b1b' };
+    const selectStyle = { ...lookStyle(off), width: '100%', appearance: 'none', '-webkit-appearance': 'none', 'padding-right': '44px',
+      'background-image': CHEVRON_BG, 'background-repeat': 'no-repeat', 'background-position': 'right 16px center' };
+    for (const sel of filterBar.querySelectorAll('select')) applyStyle(sel, selectStyle);
+    applyStyle(filterBar.querySelector('[data-f="sort"]'), { ...lookStyle(c.list.sort ? on : off), display: 'inline-flex', 'align-items': 'center', gap: '.4em' });
   }
 
   // The list itself: the deepest element holding most of the cards, so a stray card elsewhere on the page
@@ -1886,18 +1955,23 @@
   function filterList(cards, c, ts) {
     const box = listBox(cards);
     if (!box || box === document.body || box === document.documentElement) return;
-    if (!filterBar) filterBar = makeFilterBar();
-    if (filterBar.nextElementSibling !== box) box.before(filterBar);
+    placeFilterBar(c, box);
     const max = +c.list.max || 0;
-    const label = ts.length === 1 ? `Max pendling till ${ts[0].meta.label}` : 'Max pendling till alla resmål';
     const q = (f) => filterBar.querySelector(`[data-f="${f}"]`);
-    if (filterBar.querySelector('[data-l="max"]').textContent !== label) filterBar.querySelector('[data-l="max"]').textContent = label;
+    // Destinations: "Mina resmål" when some of yours have a table, then every published table.
+    const mine = myTables(c);
+    const opts = [...(mine.length ? [['mine', `Mina resmål (${mine.map((m) => m.label).join(', ')})`]] : []), ...tableIndex().map((m) => [m.key, m.label])];
+    const optsSig = JSON.stringify(opts);
+    if (q('dest')._sig !== optsSig) {
+      q('dest')._sig = optsSig;
+      q('dest').innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('');
+    }
+    const dest = opts.some(([v]) => v === c.list.dest) ? c.list.dest : ts.length === 1 ? ts[0].meta.key : opts[0][0];
+    if (q('dest').value !== dest) q('dest').value = dest;
     if (q('max').value !== String(max)) q('max').value = String(max);
     if (q('over').value !== c.list.over) q('over').value = c.list.over;
     q('over').disabled = !max;
     q('sort').setAttribute('aria-pressed', String(!!c.list.sort));
-    setStyle(q('sort'), 'background', c.list.sort ? '#1b1b1b' : '#fff');
-    setStyle(q('sort'), 'color', c.list.sort ? '#fff' : '#1b1b1b');
 
     const rows = cards.filter((x) => box.contains(x.card)).map((x, i) => ({ ...x, item: itemIn(box, x.card), i })).filter((r) => r.item);
     let over = 0;
@@ -2569,7 +2643,10 @@
     }
 
     function secLists() {
-      const on = d.list.table !== 'off';
+      const on = d.list.dest !== 'off';
+      const mine = myTables(d);
+      const destOpts = [['mine', mine.length ? `Mina resmål (${mine.map((m) => m.label).join(', ')})` : `Mina resmål (ingen har tidtabell, visar ${tableIndex()[0].label})`],
+        ...tableIndex().map((m) => [m.key, m.label]), ['off', 'Visa inte']];
       // Which of your resmål have a published table, and how old it is.
       const status = d.destinations.map((x) => {
         const m = tableMetaFor(x);
@@ -2581,11 +2658,11 @@
       }).join('');
       const opt = (v, label, cur) => `<option value="${v}" ${String(v) === String(cur) ? 'selected' : ''}>${esc(label)}</option>`;
       return `<section><h3>Listor och kartan</h3>
-        <p class="hint">Varje bostad i sökresultaten får en ungefärlig restid till dina resmål, räknad från en tidtabell som uppdateras varje vecka. Det behövs ingen nyckel och inga anrop till Trafiklab. På bostadssidan räknas restiden exakt.</p>
+        <p class="hint">Varje bostad i sökresultaten får en ungefärlig restid, räknad från en tidtabell som uppdateras varje vecka. Välj ett av resmålen med färdiga tidtabeller, eller dina egna om de har en. Det behövs ingen nyckel och inga anrop till Trafiklab. På bostadssidan räknas restiden exakt.</p>
         <div class="grid2">
-          <div class="field"><label for="lt">I listorna</label>
-            <select id="lt" class="wide" data-k="lt" data-f="listTable">${opt('auto', 'Visa ungefärlig restid', on ? 'auto' : 'off')}${opt('off', 'Visa inte', on ? 'auto' : 'off')}</select></div>
-          ${on ? `<div class="field"><label for="lmax">Max pendling, till alla resmål</label>
+          <div class="field"><label for="lt">Pendling till, i listorna</label>
+            <select id="lt" class="wide" data-k="lt" data-f="listDest">${destOpts.map(([v, l]) => opt(v, l, d.list.dest)).join('')}</select></div>
+          ${on ? `<div class="field"><label for="lmax">Max restid</label>
             <select id="lmax" class="wide" data-k="lmax" data-f="listMax">${opt(0, 'Alla', d.list.max)}${LIST_MAXES.map((m) => opt(m, `${m} min`, d.list.max)).join('')}</select></div>` : ''}
         </div>
         ${on ? `<div class="row"><span class="lbl" id="lo-l" style="margin:0">Över gränsen</span>${seg('listOver', [{ v: 'hide', label: 'Dölj' }, { v: 'dim', label: 'Tona ner' }], d.list.over, 'lo-l')}</div>
@@ -2716,7 +2793,7 @@
     sr.addEventListener('change', (e) => {
       const t = e.target;
       if (t.dataset.f === 'lastHome') { d.lastHome = t.value; paint(); }
-      else if (t.dataset.f === 'listTable') { d.list.table = t.value; paint(); }
+      else if (t.dataset.f === 'listDest') { d.list.dest = t.value; paint(); }
       else if (t.dataset.f === 'listMax') { d.list.max = +t.value; paint(); }
       else if (t.dataset.act === 'listSort') { d.list.sort = t.checked; paint(); }
       else if (t.dataset.f in numberFields) paint(); // weights and the like update presets and bars

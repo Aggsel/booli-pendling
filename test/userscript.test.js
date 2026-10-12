@@ -185,7 +185,7 @@ test('map dots over the limit are dimmed through the map layer', async () => {
     el.__reactFiber$test = { stateNode: el, memoizedProps: {}, memoizedState: null,
       return: { stateNode: null, memoizedProps: {}, memoizedState: { memoizedState: { current: fake }, next: null }, return: null } };
   };
-  const store = { ...STORE, config: { list: { table: 'auto', max: 40, over: 'dim', sort: false } } };
+  const store = { ...STORE, config: { list: { dest: 'mine', max: 40, over: 'dim', sort: false } } };
   const { api } = load({ url: 'https://www.booli.se/sok/till-salu', body: `<div class="maplibregl-map" id="map"></div>${pageHtml}`, store, before });
   await sleep(500); // the map is checked a moment after it settles
   const t = api.indexTable(TABLE), c = api.cfg();
@@ -218,7 +218,7 @@ test('map dots in vector tiles (like Booli\'s listingSource) are dimmed by featu
     el.__reactFiber$test = { stateNode: el, memoizedProps: {}, memoizedState: null,
       return: { stateNode: null, memoizedProps: { mapRef: { current: fake } }, memoizedState: null, return: null } };
   };
-  const store = { ...STORE, config: { list: { table: 'auto', max: 40, over: 'hide', sort: false } } };
+  const store = { ...STORE, config: { list: { dest: 'mine', max: 40, over: 'hide', sort: false } } };
   const { api } = load({ url: 'https://www.booli.se/sok/till-salu', body: `<div class="maplibregl-map" id="map"></div>${pageHtml}`, store, before });
   await sleep(500);
   const t = api.indexTable(TABLE), c = api.cfg();
@@ -233,7 +233,7 @@ test('listings without a position stay visible and say "pendling okänd"', async
   const body = `<main><ul id="list">${card({ id: 999001 })}${card({ id: 999002 })}</ul></main>`;
   const { w, close } = load({ url: 'https://www.booli.se/sok/till-salu', body, store: {
     ...STORE,
-    config: { list: { table: 'auto', max: 20, over: 'hide', sort: false } },
+    config: { list: { dest: 'mine', max: 20, over: 'hide', sort: false } },
   } });
   await sleep(50); // per-listing fetches fail in the stub
   await sleep(400);
@@ -244,16 +244,47 @@ test('listings without a position stay visible and say "pendling okänd"', async
   close();
 });
 
-test('a destination without a table keeps the old button (with a key) and shows no estimates', () => {
-  const store = {
-    ...STORE,
-    config: { apiKey: 'k', destinations: [{ name: 'Lindholmen', id: '1', lat: 57.7069, lon: 11.9385 }] },
-  };
-  const { w, close } = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml, store });
+test('resmål without a table: the list shows the first published destination instead of the button', () => {
+  const store = { ...STORE, config: { apiKey: 'k', destinations: [{ name: 'Partille station', id: '1', lat: 57.74107, lon: 12.10366 }] } };
+  const { w } = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml, store });
+  assert.equal(w.document.querySelectorAll('[data-bcs-est$=":gbg-c"]').length, N);
+  assert.equal(w.document.querySelectorAll('[data-bcs-btn]').length, 0);
+  assert.equal(w.document.querySelector('[data-f="dest"]').value, 'gbg-c');
+});
+
+test('list estimates switched off: the old button comes back (with a key)', () => {
+  const store = { ...STORE, config: { apiKey: 'k', list: { dest: 'off' } } };
+  const { w } = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml, store });
   assert.equal(w.document.querySelectorAll('[data-bcs-est]').length, 0);
   assert.equal(w.document.querySelectorAll('[data-bcs-btn]').length, N);
   assert.equal(w.document.querySelector('[data-bcs-filter]'), null);
-  close();
+});
+
+test('choosing a destination in the bar switches every card to that table', () => {
+  const store = { ...STORE, 'table:index': INDEX(TABLE, LINDHOLMEN), 'table:lindholmen': { t: Date.now(), data: LINDHOLMEN } };
+  const { w, api, values } = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml, store });
+  const doc = w.document, sel = doc.querySelector('[data-f="dest"]');
+  assert.deepEqual([...sel.options].map((o) => o.textContent), ['Mina resmål (Göteborg C)', 'Göteborg C', 'Lindholmen']);
+  sel.value = 'lindholmen';
+  sel.dispatchEvent(new w.Event('change', { bubbles: true }));
+  assert.equal(values.get('config').list.dest, 'lindholmen');
+  const t = api.indexTable(LINDHOLMEN), c = api.cfg(), l = listings[0], e = api.estimate(l, c, t);
+  assert.equal(est(doc, l.id, 'lindholmen').textContent.trim(), e ? `ca ${e.mins} min till Lindholmen` : 'pendling okänd till Lindholmen');
+  assert.equal(doc.querySelectorAll('[data-bcs-est$=":gbg-c"]').length, 0);
+});
+
+test('the bar sits under Booli\'s Sökfilter row and copies its buttons\' look', () => {
+  const head = `<div id="head"><div id="search"></div><div id="row"><button style="height:56px;border:1px solid rgb(10, 20, 30);border-radius:6px;font-size:18px">Sökfilter</button>
+    <button style="background-color:rgb(27, 27, 27);color:rgb(255, 255, 255)">Spara sökning</button></div><p>Villor till salu</p></div>`;
+  const { w } = load({ url: 'https://www.booli.se/sok/till-salu', body: head + pageHtml, store: STORE });
+  const doc = w.document, bar = doc.querySelector('[data-bcs-filter]');
+  assert.equal(bar.previousElementSibling.id, 'row');
+  const sel = bar.querySelector('select');
+  assert.equal(sel.style.height, '56px');
+  assert.equal(sel.style.borderRadius, '6px');
+  assert.equal(sel.style.fontSize, '18px');
+  bar.querySelector('[data-f="sort"]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  assert.equal(bar.querySelector('[data-f="sort"]').style.backgroundColor, 'rgb(27, 27, 27)'); // "on" looks like Spara sökning
 });
 
 test('two resmål with tables: one estimate each, and the filter uses the longest', () => {
@@ -261,7 +292,7 @@ test('two resmål with tables: one estimate each, and the filter uses the longes
     'table:index': INDEX(TABLE, LINDHOLMEN), 'table:gbg-c': { t: Date.now(), data: TABLE }, 'table:lindholmen': { t: Date.now(), data: LINDHOLMEN },
     config: {
       destinations: [{ name: 'Göteborg Centralstation', id: '740000002', lat: 57.708895, lon: 11.973479 }, { name: 'Göteborg Lindholmen', id: '2', lat: 57.70814, lon: 11.938088 }],
-      list: { table: 'auto', max: 40, over: 'hide', sort: false },
+      list: { dest: 'mine', max: 40, over: 'hide', sort: false },
     },
   };
   const { w, api, requests } = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml, store });
@@ -274,7 +305,8 @@ test('two resmål with tables: one estimate each, and the filter uses the longes
     const over = a && b && Math.max(a.mins, b.mins) > 40;
     assert.equal(item(doc, l.id).style.display === 'none', !!over, `listing ${l.id}`);
   }
-  assert.match(doc.querySelector('[data-bcs-filter]').textContent, /Max pendling till alla resmål/);
+  assert.equal(doc.querySelector('[data-f="dest"]').value, 'mine');
+  assert.equal(doc.querySelector('[data-f="dest"]').selectedOptions[0].textContent, 'Mina resmål (Göteborg C, Lindholmen)');
   assert.deepEqual(requests, []);
 });
 
