@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.14.0
+// @version      1.15.0
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -146,7 +146,7 @@
     showTodayDelta: true,
     everyday: { grocery: { on: true, mode: 'bike' }, school: { on: true, mode: 'walk' }, car: { on: true } },
     destinations: [{ name: 'Göteborg Centralstation', id: '740000002', lat: 57.708895, lon: 11.973479, ...DEFAULT_DEST }],
-    list: { dest: 'mine', mode: 'transit', max: 0, over: 'dim', sort: false }, // result lists: 'mine', a table key or 'off';
+    list: { dest: 'mine', mode: 'transit', max: 0, over: 'dim' }, // result lists: 'mine', a table key or 'off';
     // mode 'transit' or 'car'; max minutes (0 = all)
   };
 
@@ -156,6 +156,7 @@
     const c = Object.assign({}, DEFAULTS, saved);
     c.weights = Object.assign({}, DEFAULTS.weights, saved.weights || {});
     c.list = Object.assign({}, DEFAULTS.list, saved.list || {});
+    delete c.list.sort; // sorting by commute was removed: Booli sorts its results before they reach the page
     if (saved.list && saved.list.table === 'off' && !saved.list.dest) c.list.dest = 'off';
     delete c.list.table;
     c.details = Object.assign({}, DEFAULTS.details, saved.details || {});
@@ -1852,7 +1853,6 @@
     const cards = findListCards().filter(({ card }) => !card.closest('[data-bcs-popup]') && !card.querySelector('[data-bcs-popup]'));
     const ts = cards.length ? tablesFor(c) : [];
     if (!ts.length) {
-      try { decorateSortMenu(c, false); } catch {}
       resetList();
       if (c.apiKey) decorateListButtons(cards, c);
       return;
@@ -1861,7 +1861,6 @@
     const sig = settingsSig(c);
     for (const x of cards) x.est = estimateItems(x.line, x.id, c, ts, sig);
     filterList(cards, c, ts);
-    try { decorateSortMenu(c, true); } catch {}
   }
 
   // One "ca 34 min till Göteborg C" item per table in a card's facts line. Only touches the page when something changed.
@@ -1971,8 +1970,8 @@
     const to = ts.length === 1 ? ts[0].meta.label : 'dina resmål';
     const how = carMode(c) ? 'med bil' : 'kollektivt';
     const text = max
-      ? `Pendling: högst ${max} min ${how} till ${to}${counts ? ` · ${counts}` : ''}${mapHooked ? ' · lila på kartan är över gränsen' : ''}${c.list.sort ? ' · sorterad efter pendling' : ''}.`
-      : `Restid ${how} till ${to} visas på varje bostad${c.list.sort ? ', sorterad efter pendling' : ''}.`;
+      ? `Pendling: högst ${max} min ${how} till ${to}${counts ? ` · ${counts}` : ''}${mapHooked ? ' · lila på kartan är över gränsen' : ''}.`
+      : `Restid ${how} till ${to} visas på varje bostad.`;
     const html = `${esc(text)} <a href="#" data-act="open" style="color:inherit;font-weight:600;text-decoration:underline;text-underline-offset:3px">${max ? 'Ändra' : 'Sätt en gräns'} under Sökfilter</a>`;
     if (filterBar._html !== html) { filterBar._html = html; filterBar.innerHTML = html; }
   }
@@ -2118,78 +2117,6 @@
     if (!on && !t._on) { setStyle(t, 'background-color', ''); setStyle(t, 'border-color', ''); }
   };
 
-  // ---------- "Pendling (Kortast)" in Booli's sort menu ----------
-  // The menu that opens from Booli's sort button ("Nyast"): its options are found by their texts. Ours is a copy
-  // of one of them. While it's chosen, the button shows its name and it carries the check mark.
-  const SORT_LABEL = 'Pendling (Kortast)';
-  const SORT_TEXT = /^([A-ZÅÄÖ][a-zåäö]+( \([A-ZÅÄÖ][a-zåäö]+\))?)$/; // "Nyast", "Pris (Lägst)" …
-  const isSortButton = (b) => (b.getAttribute('aria-haspopup') || b.getAttribute('aria-expanded') || b.getAttribute('role') === 'combobox')
-    && (SORT_TEXT.test(b.textContent.trim()) || b.textContent.trim() === SORT_LABEL);
-  function findSortMenu() {
-    const leaf = (re) => [...document.querySelectorAll('li, [role="option"], [role="menuitem"], button, a, span, div')]
-      .find((el) => re.test(el.textContent.trim()) && !el.closest('[data-bcs-sort-item]') && ![...el.children].some((ch) => re.test(ch.textContent.trim())) && !isSortButton(el) && !el.closest('button[aria-haspopup], button[aria-expanded]'));
-    const a = leaf(/^Nyast$/), b = leaf(/^Äldst$/);
-    if (!a || !b) return null;
-    const menu = lca([a, b]);
-    if (!menu || menu === document.body) return null;
-    const items = [...menu.children].filter((ch) => !ch.hasAttribute('data-bcs-sort-item'));
-    if (items.length < 2) return null;
-    return { menu, items, tplItem: childOf(menu, b) };
-  }
-  const sortButton = () => [...document.querySelectorAll('button, [role="combobox"]')].find(isSortButton);
-  // Booli's chosen option: marked as such, or the only one with an icon (the check mark).
-  function chosenItem(items) {
-    const marked = items.find((it) => ['aria-selected', 'aria-checked', 'aria-current'].some((x) => it.getAttribute(x) === 'true' || (it.querySelector(`[${x}="true"]`))));
-    if (marked) return marked;
-    const withIcon = items.filter((it) => it.querySelector('svg'));
-    return withIcon.length === 1 ? withIcon[0] : null;
-  }
-  function decorateSortMenu(c, on) {
-    const active = on && !!c.list.sort;
-    // The button: our name while our sorting is on; Booli's own otherwise.
-    const btn = sortButton();
-    if (btn) {
-      const label = leafWith(btn, SORT_TEXT) || leafWith(btn, new RegExp(`^${SORT_LABEL.replace(/[()]/g, '\\$&')}$`));
-      if (label && active && label.textContent.trim() !== SORT_LABEL) { label.dataset.bcsOrig = label.textContent; label.textContent = SORT_LABEL; }
-      if (label && !active && label.dataset.bcsOrig) { label.textContent = label.dataset.bcsOrig; delete label.dataset.bcsOrig; }
-    }
-    const m = findSortMenu();
-    let item = document.querySelector('[data-bcs-sort-item]');
-    if (!m || !on) { if (item && !on) item.remove(); return; }
-    if (!item || !m.menu.contains(item)) {
-      item = stripIds(m.tplItem.cloneNode(true));
-      item.setAttribute('data-bcs-sort-item', '');
-      item.querySelectorAll('svg').forEach((x) => x.remove());
-      const leaf = leafWith(item, /^Äldst$/);
-      if (leaf) leaf.textContent = SORT_LABEL;
-      [item, ...item.querySelectorAll('a[href]')].forEach((x) => x.removeAttribute && x.removeAttribute('href'));
-      item.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        updateList((l) => ({ ...l, sort: true }));
-        const b = sortButton();
-        if (b && b.getAttribute('aria-expanded') !== 'false') b.click(); // close the menu
-      }, true);
-      m.menu.appendChild(item);
-      // Choosing one of Booli's own options turns ours off; Booli handles the rest.
-      m.menu.addEventListener('click', (e) => {
-        if (!e.target.closest('[data-bcs-sort-item]') && cfg().list.sort) updateList((l) => ({ ...l, sort: false }));
-      }, true);
-    }
-    // The check mark: ours while active (a copy of Booli's), Booli's chosen option's otherwise.
-    const chosen = chosenItem(m.items);
-    const check = chosen && chosen.querySelector('svg');
-    const mine = item.querySelector('svg');
-    if (active && check && !mine) item.appendChild(check.cloneNode(true));
-    if (!active && mine) mine.remove();
-    if (check) {
-      if (active && check.style.visibility !== 'hidden') { check.style.visibility = 'hidden'; check.dataset.bcsHidden = ''; }
-      if (!active && 'bcsHidden' in check.dataset) { check.style.visibility = ''; delete check.dataset.bcsHidden; }
-    }
-    const leaf = leafWith(item, new RegExp(`^${SORT_LABEL.replace(/[()]/g, '\\$&')}$`));
-    if (leaf) setStyle(leaf, 'font-weight', active ? '600' : '');
-  }
-
   let panelSection = null;
   function decoratePanel(c) {
     const p = findFilterPanel();
@@ -2234,13 +2161,13 @@
   const itemIn = (box, el) => { while (el && el.parentElement !== box) el = el.parentElement; return el; };
   const setStyle = (el, prop, v) => { if (el.style[prop] !== v) el.style[prop] = v; };
 
-  // Hide or dim listings over the limit, and order the loaded cards by commute (Booli's own sort is left alone).
+  // Hide or dim listings over the limit.
   function filterList(cards, c, ts) {
     const box = listBox(cards);
     if (!box || box === document.body || box === document.documentElement) return;
     const max = +c.list.max || 0;
 
-    const rows = cards.filter((x) => box.contains(x.card)).map((x, i) => ({ ...x, item: itemIn(box, x.card), i })).filter((r) => r.item);
+    const rows = cards.filter((x) => box.contains(x.card)).map((x) => ({ ...x, item: itemIn(box, x.card) })).filter((r) => r.item);
     let over = 0;
     for (const r of rows) {
       const mode = max && r.est && r.est.mins > max ? c.list.over : '';
@@ -2253,29 +2180,11 @@
     const counts = !max ? '' : over === 0 ? `alla ${rows.length} inom gränsen` : c.list.over === 'hide'
       ? `visar ${rows.length - over} av ${rows.length}` : `${over} av ${rows.length} över gränsen`;
     placeSummary(c, ts, box, counts);
-
-    if (c.list.sort) {
-      if (!box.dataset.bcsSort) {
-        const native = /flex|grid/.test(getComputedStyle(box).display);
-        box.dataset.bcsSort = native ? 'native' : 'set';
-        if (!native) { box.style.display = 'flex'; box.style.flexDirection = 'column'; }
-      }
-      const ranked = rows.slice().sort((a, b) => (a.est ? a.est.mins : 1e6) - (b.est ? b.est.mins : 1e6) || a.i - b.i);
-      ranked.forEach((r, k) => setStyle(r.item, 'order', String(k + 1)));
-      const mine = new Set(rows.map((r) => r.item));
-      for (const ch of box.children) if (!mine.has(ch)) setStyle(ch, 'order', String(rows.length + 1)); // ads and the like go last
-    } else if (box.dataset.bcsSort) unsort(box);
   }
 
-  function unsort(box) {
-    if (box.dataset.bcsSort === 'set') { box.style.display = ''; box.style.flexDirection = ''; }
-    delete box.dataset.bcsSort;
-    for (const ch of box.children) ch.style.order = '';
-  }
   function resetList() {
     if (filterBar) filterBar.remove();
     document.querySelectorAll('[data-bcs-f]').forEach((el) => { el.style.display = ''; el.style.opacity = ''; delete el.dataset.bcsF; });
-    document.querySelectorAll('[data-bcs-sort]').forEach(unsort);
   }
 
   // ---------- map dots ----------
@@ -3298,7 +3207,6 @@ self.onmessage = (e) => {
             <select id="lmax" class="wide" data-k="lmax" data-f="listMax">${opt(0, 'Alla', d.list.max)}${LIST_MAXES.map((m) => opt(m, `${m} min`, d.list.max)).join('')}</select></div>` : ''}
         </div>
         ${on ? `<div class="row"><span class="lbl" id="lo-l" style="margin:0">Över gränsen</span>${seg('listOver', [{ v: 'hide', label: 'Dölj' }, { v: 'dim', label: 'Tona ner' }], d.list.over, 'lo-l')}</div>
-          <label class="check solo"><input type="checkbox" data-act="listSort" data-k="listSort" ${d.list.sort ? 'checked' : ''}>Sortera efter pendling</label>
           ${status ? `<ul class="note" style="padding-left:1.2em">${status}</ul>` : ''}
           <p class="note">Restidstabell: Trafiklab (Samtrafiken).${hasCar() ? ' Körtider: © OpenStreetMap-bidragsgivare (OSRM), rusning uppskattad.' : ''}</p>` : ''}
       </section>`;
@@ -3428,7 +3336,7 @@ self.onmessage = (e) => {
       else if (t.dataset.f === 'listDest') { d.list.dest = t.value; paint(); }
       else if (t.dataset.f === 'listMode') { d.list.mode = t.value; paint(); }
       else if (t.dataset.f === 'listMax') { d.list.max = +t.value; paint(); }
-      else if (t.dataset.act === 'listSort') { d.list.sort = t.checked; paint(); }
+
       else if (t.dataset.f in numberFields) paint(); // weights and the like update presets and bars
       else if (t.dataset.act === 'detail') { d.details[t.dataset.v] = t.checked; paint(); }
       else if (t.dataset.act === 'todayDelta') { d.showTodayDelta = t.checked; paint(); }
@@ -3443,7 +3351,7 @@ self.onmessage = (e) => {
       if (!t || t.disabled) return;
       const act = t.dataset.act;
       const v = t.dataset.v;
-      if (act === 'detail' || act === 'todayDelta' || act === 'listSort') return; // handled by change
+      if (act === 'detail' || act === 'todayDelta') return; // handled by change
       if (act === 'close') return close();
       if (act === 'save') return save();
       if (act === 'reset') {

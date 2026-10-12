@@ -159,7 +159,7 @@ test('on the map, the minutes come from the background worker and the shading is
     };
     el.__reactFiber$test = { stateNode: el, memoizedProps: { map: fake }, memoizedState: null, return: null };
   };
-  const store = { ...STORE, config: { list: { dest: 'mine', max: 30, over: 'dim', sort: false } } };
+  const store = { ...STORE, config: { list: { dest: 'mine', max: 30, over: 'dim' } } };
   load({ url: 'https://www.booli.se/sok/till-salu', body: '<div class="maplibregl-map" id="map"></div>', store, before });
   await sleep(600);
   assert.ok(workerMessages >= 2, 'the table and the request went to the worker');
@@ -227,7 +227,7 @@ test('by car: a house with no road nearby says "körtid okänd", and the map sha
       ...listings.map((l) => ({ booliId: l.id, location: { position: { latitude: l.lat, longitude: l.lon } } }))] } })}</script>`;
   const { w } = load({ url: 'https://www.booli.se/sok/till-salu', body, before,
     store: { ...STORE, 'table:index': carIndex, 'table:car:gbg-c': { t: Date.now(), data: CAR },
-      config: { list: { dest: 'mine', mode: 'car', max: 20, over: 'dim', sort: false } } } });
+      config: { list: { dest: 'mine', mode: 'car', max: 20, over: 'dim' } } } });
   assert.equal(est(w.document, 777001).textContent.trim(), 'körtid okänd med bil till Göteborg C');
   await sleep(500);
   assert.equal(workers, 0, 'driving minutes need no background worker');
@@ -279,7 +279,7 @@ const PANEL = `<div id="sokfilter"><h2>Sökfilter</h2><div class="sections">
 // Like the real panel: the Bostadstyp heading and its tiles share one wrapper inside the section.
 const PANEL_WRAPPED = PANEL.replace('<section class="sec"><h3 class="sec-h">Bostadstyp</h3><div class="tiles">', '<section class="sec"><div class="stack"><h3 class="sec-h">Bostadstyp</h3><div class="tiles">')
   .replace('<span>Gård</span></button></div></section>', '<span>Gård</span></button></div></div></section>');
-// Booli's sort button and its open menu: options with the chosen one carrying a check mark.
+// Booli's sort button and its open menu (the script leaves it alone).
 const SORT_MENU = `<div id="sorting"><button id="sortbtn" aria-haspopup="listbox" aria-expanded="true"><span>Nyast</span><svg class="chev"></svg></button>
   <ul class="menu" role="listbox"><li class="mi mi-on"><span>Nyast</span><svg class="check"></svg></li><li class="mi"><span>Äldst</span></li>
   <li class="mi"><span>Pris (Lägst)</span></li></ul></div>`;
@@ -304,7 +304,7 @@ test('result list: every card shows an estimate at once, without a key and witho
   close();
 });
 
-test('filter hides or dims exactly the cards over the limit, sorting reorders them, and both survive a redraw', async () => {
+test('filter hides or dims exactly the cards over the limit, and survives a redraw', async () => {
   const { w, api, values, close } = load({ url: 'https://www.booli.se/sok/till-salu?areaIds=22', body: PANEL + SORT_MENU + pageHtml, store: STORE });
   const doc = w.document;
   const t = api.indexTable(TABLE), c = api.cfg();
@@ -326,15 +326,13 @@ test('filter hides or dims exactly the cards over the limit, sorting reorders th
   assert.deepEqual(hidden(), []);
   assert.deepEqual(listings.filter((l) => item(doc, l.id).style.opacity === '0.35').map((l) => l.id), over);
 
-  doc.querySelector('[data-bcs-sort-item]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  const shown = () => listings.map((l) => ({ id: l.id, order: +item(doc, l.id).style.order })).sort((a, b) => a.order - b.order).map((x) => mins[x.id] ?? 1e6);
-  assert.deepEqual(shown(), [...shown()].sort((a, b) => a - b));
+  assert.equal(doc.querySelector('[data-bcs-sort-item]'), null, 'no sorting by commute: Booli sorts its results first');
+  assert.ok(listings.every((l) => item(doc, l.id).style.order === ''), 'Booli\'s order is left alone');
 
   // Booli redraws the list: everything is applied again.
   doc.getElementById('list').outerHTML = listHtml();
   await sleep(450);
   assert.deepEqual(listings.filter((l) => item(doc, l.id).style.opacity === '0.35').map((l) => l.id), over);
-  assert.deepEqual(shown(), [...shown()].sort((a, b) => a - b));
   assert.equal(doc.querySelectorAll('[data-bcs-filter]').length, 1);
   close();
 });
@@ -365,7 +363,7 @@ test('map dots over the limit are dimmed through the map layer', async () => {
     el.__reactFiber$test = { stateNode: el, memoizedProps: {}, memoizedState: null,
       return: { stateNode: null, memoizedProps: {}, memoizedState: { memoizedState: { current: fake }, next: null }, return: null } };
   };
-  const store = { ...STORE, config: { list: { dest: 'mine', max: 40, over: 'dim', sort: false } } };
+  const store = { ...STORE, config: { list: { dest: 'mine', max: 40, over: 'dim' } } };
   const { api } = load({ url: 'https://www.booli.se/sok/till-salu', body: `<div class="maplibregl-map" id="map"></div>${pageHtml}`, store, before });
   await sleep(500); // the map is checked a moment after it settles
   const t = api.indexTable(TABLE), c = api.cfg();
@@ -398,7 +396,7 @@ test('map dots in vector tiles (like Booli\'s listingSource) are dimmed by featu
     el.__reactFiber$test = { stateNode: el, memoizedProps: {}, memoizedState: null,
       return: { stateNode: null, memoizedProps: { mapRef: { current: fake } }, memoizedState: null, return: null } };
   };
-  const store = { ...STORE, config: { list: { dest: 'mine', max: 40, over: 'hide', sort: false } } };
+  const store = { ...STORE, config: { list: { dest: 'mine', max: 40, over: 'hide' } } };
   const { api } = load({ url: 'https://www.booli.se/sok/till-salu', body: `<div class="maplibregl-map" id="map"></div>${pageHtml}`, store, before });
   await sleep(500);
   const t = api.indexTable(TABLE), c = api.cfg();
@@ -430,7 +428,7 @@ test('areas over the limit are shaded under the dots, so grouped dots are covere
     fake = { ...fake, idleCount: 0, on: (ev, fn) => { if (ev === 'idle') { fake.idle = fn; fake.idleCount++; } } };
     el.__reactFiber$test = { stateNode: el, memoizedProps: { map: fake }, memoizedState: null, return: null };
   };
-  const store = { ...STORE, config: { list: { dest: 'mine', max: 30, over: 'dim', sort: false } } };
+  const store = { ...STORE, config: { list: { dest: 'mine', max: 30, over: 'dim' } } };
   const { api } = load({ url: 'https://www.booli.se/sok/till-salu', body: `<div class="maplibregl-map" id="map"></div>${pageHtml}`, store, before });
   await sleep(500);
   const shade = layers.find((l) => l.id === 'bcs-commute-shade');
@@ -477,7 +475,7 @@ test('zoomed out, a small pocket within the limit near a stop is not lost in a b
     el.__reactFiber$test = { stateNode: el, memoizedProps: { map: fake }, memoizedState: null, return: null };
   };
   const store = { 'table:index': INDEX(POCKET), 'table:gbg-c': { t: Date.now(), data: POCKET },
-    config: { accessModes: { walk: true, bike: false, bus: true }, list: { dest: 'mine', max: 20, over: 'dim', sort: false } } };
+    config: { accessModes: { walk: true, bike: false, bus: true }, list: { dest: 'mine', max: 20, over: 'dim' } } };
   load({ url: 'https://www.booli.se/sok/till-salu', body: '<div class="maplibregl-map" id="map"></div>', store, before });
   await sleep(500);
   const feats = sources.get('bcs-commute-shade').data.features;
@@ -502,7 +500,7 @@ test('the shading lies under Booli\'s search-area layers, in violet, and continu
     };
     el.__reactFiber$test = { stateNode: el, memoizedProps: { map: fake }, memoizedState: null, return: null };
   };
-  const store = { ...STORE, config: { list: { dest: 'mine', max: 20, over: 'dim', sort: false } } };
+  const store = { ...STORE, config: { list: { dest: 'mine', max: 20, over: 'dim' } } };
   load({ url: 'https://www.booli.se/sok/till-salu', body: '<div class="maplibregl-map" id="map"></div>', store, before });
   await sleep(500);
   const fill = layers.find((l) => l.id === 'bcs-commute-shade'), edge = layers.find((l) => l.id === 'bcs-commute-shade-edge');
@@ -517,7 +515,7 @@ test('listings without a position stay visible and say "pendling okänd"', async
   const body = `<main><ul id="list">${card({ id: 999001 })}${card({ id: 999002 })}</ul></main>`;
   const { w, close } = load({ url: 'https://www.booli.se/sok/till-salu', body, store: {
     ...STORE,
-    config: { list: { dest: 'mine', max: 20, over: 'hide', sort: false } },
+    config: { list: { dest: 'mine', max: 20, over: 'hide' } },
   } });
   await sleep(50); // per-listing fetches fail in the stub
   await sleep(400);
@@ -569,7 +567,7 @@ test('the controls are a section in Booli\'s Sökfilter panel, built from its ow
   assert.deepEqual(labels, ['Pendling till', 'Max restid', 'Över gränsen']);
   assert.ok([...section.querySelectorAll('select')].every((s) => s.className === 'sel' && !s.name));
   assert.equal(section.querySelector('.pair').children.length, 3);
-  assert.equal(ctl(doc, 'sort'), null, 'sorting lives in Booli\'s sort menu');
+  assert.equal(ctl(doc, 'sort'), null);
   // Booli redraws and adds a part at the end: the section moves back after Snart till salu.
   const extra = doc.createElement('section');
   extra.className = 'sec';
@@ -594,35 +592,10 @@ test('when heading and tiles share a wrapper, the section copies the wrapper wit
   assert.equal(w.document.querySelectorAll('button.tile').length, 3 + 2, 'Booli\'s three, and our Kollektivt and Bil');
 });
 
-test('"Pendling (Kortast)" is an option in Booli\'s sort menu, and Booli\'s own options turn it off', () => {
-  const { w, values } = load({ url: 'https://www.booli.se/sok/till-salu', body: SORT_MENU + pageHtml, store: STORE });
-  const doc = w.document, menu = doc.querySelector('.menu');
-  let toggled = 0;
-  doc.getElementById('sortbtn').addEventListener('click', () => toggled++);
-  const mine = menu.lastElementChild;
-  assert.ok(mine.hasAttribute('data-bcs-sort-item'));
-  assert.equal(mine.className, 'mi', 'a copy of one of Booli\'s options');
-  assert.equal(mine.textContent.trim(), 'Pendling (Kortast)');
-  assert.equal(mine.querySelector('svg'), null, 'no check mark while not chosen');
-
-  mine.dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
-  assert.equal(values.get('config').list.sort, true);
-  assert.equal(toggled, 1, 'the menu is closed');
-  assert.equal(doc.querySelector('#sortbtn span').textContent, 'Pendling (Kortast)');
-  assert.ok(mine.querySelector('svg.check'), 'ours has the check mark');
-  assert.equal(menu.querySelector('.mi-on svg.check').style.visibility, 'hidden', 'Booli\'s is hidden');
-
-  menu.children[1].dispatchEvent(new w.MouseEvent('click', { bubbles: true })); // Äldst
-  assert.equal(values.get('config').list.sort, false);
-  assert.equal(doc.querySelector('#sortbtn span').textContent, 'Nyast', 'Booli\'s own name back (Booli then shows its new choice)');
-  assert.equal(mine.querySelector('svg'), null);
-  assert.equal(menu.querySelector('.mi-on svg.check').style.visibility, '');
-});
-
 test('on the page, one line under Sökfilter says what is active and opens Sökfilter', () => {
   const head = `<div id="head"><div id="row"><button id="sf"><svg></svg><span>Sökfilter</span><span>1</span></button>
     <button>Spara sökning</button></div><p>Villor till salu</p></div>`;
-  const store = { ...STORE, config: { list: { dest: 'mine', max: 40, over: 'dim', sort: false } } };
+  const store = { ...STORE, config: { list: { dest: 'mine', max: 40, over: 'dim' } } };
   const { w } = load({ url: 'https://www.booli.se/sok/till-salu', body: head + pageHtml, store });
   const doc = w.document, line = doc.querySelector('[data-bcs-filter]');
   assert.equal(line.previousElementSibling.id, 'row');
@@ -639,7 +612,7 @@ test('two resmål with tables: one estimate each, and the filter uses the longes
     'table:index': INDEX(TABLE, LINDHOLMEN), 'table:gbg-c': { t: Date.now(), data: TABLE }, 'table:lindholmen': { t: Date.now(), data: LINDHOLMEN },
     config: {
       destinations: [{ name: 'Göteborg Centralstation', id: '740000002', lat: 57.708895, lon: 11.973479 }, { name: 'Göteborg Lindholmen', id: '2', lat: 57.70814, lon: 11.938088 }],
-      list: { dest: 'mine', max: 40, over: 'hide', sort: false },
+      list: { dest: 'mine', max: 40, over: 'hide' },
     },
   };
   const { w, api, requests } = load({ url: 'https://www.booli.se/sok/till-salu', body: PANEL + pageHtml, store });
