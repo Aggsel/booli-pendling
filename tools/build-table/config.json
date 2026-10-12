@@ -4,7 +4,9 @@
   "arriveBy": "08:00",
   "maxMinutes": 120,
   "destinations": [
-    { "key": "gbg-c", "name": "Göteborg Centralstation", "stopNamePattern": "^Göteborg Central$", "lat": 57.7089, "lon": 11.9735, "radius": 200 }
+    { "key": "gbg-c", "name": "Göteborg Centralstation", "label": "Göteborg C", "stopNamePattern": "^Göteborg Central$", "lat": 57.7089, "lon": 11.9735, "radius": 200 },
+    { "key": "lindholmen", "name": "Lindholmen", "label": "Lindholmen", "stopNamePattern": "^Lindholmen$", "lat": 57.70814, "lon": 11.93809, "radius": 150 },
+    { "key": "gamlestaden", "name": "Gamlestaden Station", "label": "Gamlestaden", "stopNamePattern": "^Gamlestaden Station$", "lat": 57.72733, "lon": 12.00417, "radius": 150 }
   ],
   "spotCheck": [
     "Mölndal station", "Lindome station", "Kungsbacka station", "Partille station", "Lerum station", "Alingsås station", "Kungälv resecentrum", "Backa Kyrkogata", "Frölunda Torg", "Angered Centrum"

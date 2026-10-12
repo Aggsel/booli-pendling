@@ -231,7 +231,7 @@ export async function buildTables(dir, config, opts) {
       key: d.key,
       table: {
         version: 1,
-        destination: { key: d.key, name: d.name, lat: r5(found.main.lat), lon: r5(found.main.lon) },
+        destination: { key: d.key, name: d.name, label: d.label || d.name, lat: r5(found.main.lat), lon: r5(found.main.lon) },
         serviceDate: date,
         arriveBy: config.arriveBy,
         generated: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),

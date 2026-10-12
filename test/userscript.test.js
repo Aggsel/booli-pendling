@@ -24,6 +24,12 @@ const TABLE = {
   ],
 };
 const P = { lat: 57.65, lon: 12.0 };
+const meta = (t) => ({ ...t.destination, label: t.destination.label || 'Göteborg C' });
+const INDEX = (...tables) => ({ t: Date.now(), data: { version: 1, tables: tables.map(meta) } });
+// A second destination at Lindholmen, with every stop 10 min further away.
+const LINDHOLMEN = { ...TABLE, destination: { key: 'lindholmen', name: 'Lindholmen', label: 'Lindholmen', lat: 57.70675, lon: 11.93835 },
+  stops: TABLE.stops.map((r) => [r[0], r[1], r[2] + 10, ...r.slice(3)]) };
+const STORE = { 'table:index': INDEX(TABLE), 'table:gbg-c': { t: Date.now(), data: TABLE } };
 
 function load({ url = 'https://www.booli.se/', body = '', store = {} } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>${body}</body></html>`, { url, runScripts: 'outside-only', pretendToBeVisual: true });
@@ -96,19 +102,19 @@ const listHtml = () => `<ul id="list">${listings.map(card).join('')}</ul>`;
 const pageHtml = `<main>${listHtml()}</main><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
   props: { pageProps: { search: { result: listings.map((l) => ({ booliId: l.id, location: { position: { latitude: l.lat, longitude: l.lon } } })) } } },
 })}</script>`;
-const est = (doc, id) => doc.querySelector(`[data-bcs-est="${id}"]`);
+const est = (doc, id, key = 'gbg-c') => doc.querySelector(`[data-bcs-est="${id}:${key}"]`);
 const item = (doc, id) => est(doc, id).closest('li');
 
 test('result list: every card shows an estimate at once, without a key and without Trafiklab calls', async () => {
   const t0 = performance.now();
-  const { w, api, requests, close } = load({ url: 'https://www.booli.se/sok/till-salu?areaIds=22', body: pageHtml, store: { [`table:gbg-c`]: { t: Date.now(), data: TABLE } } });
+  const { w, api, requests, close } = load({ url: 'https://www.booli.se/sok/till-salu?areaIds=22', body: pageHtml, store: STORE });
   const doc = w.document;
   const t = api.indexTable(TABLE), c = api.cfg();
   for (const l of listings) {
     const el = est(doc, l.id);
     assert.ok(el, `card ${l.id} has an estimate`);
     const e = api.estimate(l, c, t);
-    assert.equal(el.textContent.trim(), e ? `ca ${e.mins} min till Göteborg C` : 'pendling okänd');
+    assert.equal(el.textContent.trim(), e ? `ca ${e.mins} min till Göteborg C` : 'pendling okänd till Göteborg C');
   }
   assert.ok(performance.now() - t0 < 1000);
   assert.deepEqual(requests, []); // no fetches at all: positions came from the page, the table from storage
@@ -117,7 +123,7 @@ test('result list: every card shows an estimate at once, without a key and witho
 });
 
 test('filter hides or dims exactly the cards over the limit, sorting reorders them, and both survive a redraw', async () => {
-  const { w, api, values, close } = load({ url: 'https://www.booli.se/sok/till-salu?areaIds=22', body: pageHtml, store: { [`table:gbg-c`]: { t: Date.now(), data: TABLE } } });
+  const { w, api, values, close } = load({ url: 'https://www.booli.se/sok/till-salu?areaIds=22', body: pageHtml, store: STORE });
   const doc = w.document;
   const t = api.indexTable(TABLE), c = api.cfg();
   const mins = Object.fromEntries(listings.map((l) => [l.id, (api.estimate(l, c, t) || {}).mins]));
@@ -155,13 +161,13 @@ test('filter hides or dims exactly the cards over the limit, sorting reorders th
 test('listings without a position stay visible and say "pendling okänd"', async () => {
   const body = `<main><ul id="list">${card({ id: 999001 })}${card({ id: 999002 })}</ul></main>`;
   const { w, close } = load({ url: 'https://www.booli.se/sok/till-salu', body, store: {
-    'table:gbg-c': { t: Date.now(), data: TABLE },
-    config: { list: { table: 'gbg-c', max: 20, over: 'hide', sort: false } },
+    ...STORE,
+    config: { list: { table: 'auto', max: 20, over: 'hide', sort: false } },
   } });
   await sleep(50); // per-listing fetches fail in the stub
   await sleep(400);
   for (const id of [999001, 999002]) {
-    assert.equal(est(w.document, id).textContent.trim(), 'pendling okänd');
+    assert.equal(est(w.document, id).textContent.trim(), 'pendling okänd till Göteborg C');
     assert.notEqual(item(w.document, id).style.display, 'none');
   }
   close();
@@ -169,7 +175,7 @@ test('listings without a position stay visible and say "pendling okänd"', async
 
 test('a destination without a table keeps the old button (with a key) and shows no estimates', () => {
   const store = {
-    'table:gbg-c': { t: Date.now(), data: TABLE },
+    ...STORE,
     config: { apiKey: 'k', destinations: [{ name: 'Lindholmen', id: '1', lat: 57.7069, lon: 11.9385 }] },
   };
   const { w, close } = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml, store });
@@ -177,6 +183,28 @@ test('a destination without a table keeps the old button (with a key) and shows 
   assert.equal(w.document.querySelectorAll('[data-bcs-btn]').length, N);
   assert.equal(w.document.querySelector('[data-bcs-filter]'), null);
   close();
+});
+
+test('two resmål with tables: one estimate each, and the filter uses the longest', () => {
+  const store = {
+    'table:index': INDEX(TABLE, LINDHOLMEN), 'table:gbg-c': { t: Date.now(), data: TABLE }, 'table:lindholmen': { t: Date.now(), data: LINDHOLMEN },
+    config: {
+      destinations: [{ name: 'Göteborg Centralstation', id: '740000002', lat: 57.708895, lon: 11.973479 }, { name: 'Göteborg Lindholmen', id: '2', lat: 57.70814, lon: 11.938088 }],
+      list: { table: 'auto', max: 40, over: 'hide', sort: false },
+    },
+  };
+  const { w, api, requests } = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml, store });
+  const doc = w.document, c = api.cfg();
+  const [tc, tl] = [api.indexTable(TABLE), api.indexTable(LINDHOLMEN)];
+  for (const l of listings) {
+    const [a, b] = [api.estimate(l, c, tc), api.estimate(l, c, tl)];
+    assert.equal(est(doc, l.id).textContent.trim(), a ? `ca ${a.mins} min till Göteborg C` : 'pendling okänd till Göteborg C');
+    assert.equal(est(doc, l.id, 'lindholmen').textContent.trim(), b ? `ca ${b.mins} min till Lindholmen` : 'pendling okänd till Lindholmen');
+    const over = a && b && Math.max(a.mins, b.mins) > 40;
+    assert.equal(item(doc, l.id).style.display === 'none', !!over, `listing ${l.id}`);
+  }
+  assert.match(doc.querySelector('[data-bcs-filter]').textContent, /Max pendling till alla resmål/);
+  assert.deepEqual(requests, []);
 });
 
 test('the table is fetched on first use when nothing is stored', async () => {

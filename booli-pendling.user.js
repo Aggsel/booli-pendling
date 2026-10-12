@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.5.1
+// @version      1.6.0
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -37,6 +37,7 @@
   const CACHE_NS = 'v4:'; // bump when cached data changes shape
   // Weekly travel-time tables, published by the repository's GitHub Action (tools/build-table), for result lists.
   const TABLE_BASE = 'https://raw.githubusercontent.com/Aggsel/booli-pendling/main/data/';
+  // Used until the published index (data/tables.json) has been fetched.
   const TABLES = [{ key: 'gbg-c', label: 'Göteborg C', name: 'Göteborg Centralstation', lat: 57.7089, lon: 11.9735 }];
   const TABLE_TTL = 7 * 24 * 3600 * 1000;
   const TABLE_STALE_DAYS = 21;
@@ -141,7 +142,7 @@
     showTodayDelta: true,
     everyday: { grocery: { on: true, mode: 'bike' }, school: { on: true, mode: 'walk' }, car: { on: true } },
     destinations: [{ name: 'Göteborg Centralstation', id: '740000002', lat: 57.708895, lon: 11.973479, ...DEFAULT_DEST }],
-    list: { table: 'gbg-c', max: 0, over: 'dim', sort: false }, // result lists: table key or 'off', max minutes (0 = all)
+    list: { table: 'auto', max: 0, over: 'dim', sort: false }, // result lists: 'auto' (a table per resmål) or 'off', max minutes (0 = all)
   };
 
   function cfg() {
@@ -645,7 +646,7 @@
   // =====================================================================
   const KM_LAT = 111.2;
   const ACCESS_RADIUS_KM = 3;
-  const tableMem = new Map(); // key → index, or null while there is none
+  const tableMem = new Map(); // 'index' or table key → parsed copy, or null while there is none
   const tableJobs = new Map();
   const tablesFailed = new Set(); // no copy at all: fetch failed and nothing stored
   let onTableLoaded = () => {};
@@ -666,48 +667,61 @@
     const ageDays = Math.floor((Date.now() - new Date(data.generated).getTime()) / 86400000);
     return { data, stops, grid, kmLon, dest: data.destination, ageDays, stale: ageDays > TABLE_STALE_DAYS };
   }
+  // The index of published tables: [{ key, name, label, lat, lon }]
+  const parseIndex = (data) => (data && data.version === 1 && Array.isArray(data.tables) ? data.tables.filter((t) => t.key && t.lat) : null);
+  const remoteFile = (name) => (name === 'index' ? 'tables.json' : `travel-times-${name}.json`);
+  const parseRemote = (name, data) => (name === 'index' ? parseIndex(data) : indexTable(data));
 
-  // The stored table, right away. Fetched on first use and then once a week; a failed fetch keeps the stored copy.
-  function tableNow(key) {
-    if (!tableMem.has(key)) {
-      const stored = GM_getValue(`table:${key}`, null);
-      const idx = stored ? indexTable(stored.data) : null;
-      tableMem.set(key, idx);
-      if (!idx || Date.now() - stored.t > TABLE_TTL) refreshTable(key);
+  // The stored copy, right away. Fetched on first use and then once a week; a failed fetch keeps the stored copy.
+  function tableNow(name) {
+    if (!tableMem.has(name)) {
+      const stored = GM_getValue(`table:${name}`, null);
+      const v = stored ? parseRemote(name, stored.data) : null;
+      tableMem.set(name, v);
+      if (!v || Date.now() - stored.t > TABLE_TTL) refreshTable(name);
     }
-    return tableMem.get(key);
+    return tableMem.get(name);
   }
-  function refreshTable(key) {
-    if (!tableJobs.has(key)) {
-      tableJobs.set(key, gmJson(`${TABLE_BASE}travel-times-${key}.json`).then((data) => {
-        const idx = indexTable(data);
-        if (!idx) throw new Error('Okänd tabell');
-        GM_setValue(`table:${key}`, { t: Date.now(), data });
-        tableMem.set(key, idx);
+  function refreshTable(name) {
+    if (!tableJobs.has(name)) {
+      tableJobs.set(name, gmJson(TABLE_BASE + remoteFile(name)).then((data) => {
+        const v = parseRemote(name, data);
+        if (!v) throw new Error('Okänd tabell');
+        GM_setValue(`table:${name}`, { t: Date.now(), data });
+        tableMem.set(name, v);
         onTableLoaded();
-        return idx;
+        return v;
       }).catch(() => {
-        const idx = tableMem.get(key) || null;
-        if (!idx) { tablesFailed.add(key); onTableLoaded(); } // nothing to show: fall back to the old per-card button
-        return idx;
+        const v = tableMem.get(name) || null;
+        if (!v) { tablesFailed.add(name); onTableLoaded(); } // nothing to show: fall back to the old per-card button
+        return v;
       }));
     }
-    return tableJobs.get(key);
+    return tableJobs.get(name);
   }
 
-  // The table to use: the chosen one, if its destination is one of your resmål (or your main one, with main = true).
-  // Returns the index, 'loading' while the first copy is on its way, or null when list estimates are off.
-  function tableFor(c, main = false) {
-    const meta = TABLES.find((t) => t.key === c.list.table);
-    if (!meta) return null;
-    const near = (d) => d.lat && haversineKm(d, meta) < 0.5;
-    const ok = main ? c.destinations.length && near(c.destinations.slice().sort((a, b) => (b.weight || 1) - (a.weight || 1))[0]) : c.destinations.some(near);
-    if (!ok) return null;
-    const idx = tableNow(meta.key);
-    if (idx) return idx;
-    return tablesFailed.has(meta.key) ? null : 'loading';
+  const mainDestOf = (c) => c.destinations.slice().sort((a, b) => (b.weight || 1) - (a.weight || 1))[0];
+  // Which published table belongs to a destination: the one whose stop is within 500 m of it.
+  const tableMetaFor = (d) => (d && d.lat ? (tableNow('index') || TABLES).find((m) => haversineKm(d, m) < 0.5) || null : null);
+
+  // The tables for your resmål (only the main one with main = true), as [{ meta, t }].
+  // t is the table, or 'loading' while its first copy is on its way. Empty when list estimates are off.
+  function tablesFor(c, main = false) {
+    if (c.list.table === 'off') return [];
+    const out = [];
+    for (const d of main ? [mainDestOf(c)] : c.destinations) {
+      const meta = tableMetaFor(d);
+      if (!meta || out.some((x) => x.meta.key === meta.key)) continue;
+      const t = tableNow(meta.key);
+      if (t) out.push({ meta, t });
+      else if (!tablesFailed.has(meta.key)) out.push({ meta, t: 'loading' });
+    }
+    return out;
   }
-  const tableLabel = (c) => (TABLES.find((t) => t.key === c.list.table) || {}).label || '';
+  const estimateMain = (p, c) => {
+    const [x] = tablesFor(c, true);
+    return x ? { e: estimate(p, c, x.t), t: x.t } : { e: null };
+  };
 
   // Approximate commute from any position: walk or cycle (straight line × 1.3) to a stop in the table, plus that
   // stop's minutes; or walk or cycle the whole way. No network calls.
@@ -740,7 +754,7 @@
   const MONTHS = ['jan', 'feb', 'mars', 'apr', 'maj', 'juni', 'juli', 'aug', 'sep', 'okt', 'nov', 'dec'];
   const fmtDay = (s) => { const [y, m, d] = String(s).split('-').map(Number); return `${d} ${MONTHS[m - 1]} ${y}`; };
   const TABLE_ICON = { t: ICON.train, s: ICON.tram, b: ICON.bus, f: ICON.ferry };
-  const estText = (e, c) => (e ? `ca ${e.mins} min till ${tableLabel(c)}` : 'pendling okänd');
+  const estText = (e, meta) => `${e ? `ca ${e.mins} min` : 'pendling okänd'} till ${meta.label}`;
   function estTitle(e, t, c) {
     if (!e) return `Ingen hållplats eller väg inom räckhåll i tidtabellen till ${t.dest.name}.`;
     const way = (a) => (a.how === 'bike' ? 'Cykla' : 'Gå');
@@ -1694,7 +1708,7 @@
     // Until the exact value is ready, show the table's estimate in its place.
     let done = false;
     listingPos(id, url).then((p) => {
-      const t = tableFor(c, true), e = estimate(p, c, t);
+      const { e, t } = estimateMain(p, c);
       if (done || !e) return;
       for (const el of items) if (el._spec.key === 'commute' && el.isConnected) setCardItem(el, `ca ${e.mins} min pendling`, '', estTitle(e, t, c));
     });
@@ -1721,10 +1735,10 @@
       card.querySelectorAll('[data-bcs-btn]').forEach((b) => b.remove());
       const line = findCardFactsLine(card);
       if (!c.apiKey) {
-        const t = tableFor(c);
-        if (!line || !t) continue;
+        const ts = tablesFor(c);
+        if (!line || !ts.length) continue;
         if (knownPos(id) === undefined) listingPos(id, url).then(() => onPositions());
-        estimateItem(line, id, c, t, settingsSig(c));
+        estimateItems(line, id, c, ts, settingsSig(c));
         continue;
       }
       card.querySelectorAll('[data-bcs-est]').forEach((e) => e.remove());
@@ -1762,46 +1776,54 @@
   const BTN_CSS = 'display:inline-flex;align-items:center;gap:.3em;margin-left:.6em;padding:.15em .7em;border:1px solid #cfcecb;' +
     'border-radius:999px;background:#fff;color:#1b1b1b;font:inherit;font-size:.85em;line-height:1.6;cursor:pointer;vertical-align:middle;white-space:nowrap;';
 
-  // Result lists: every card shows the table's estimate, with the score dot if the exact score is already saved.
+  // Result lists: every card shows the estimate to each of your resmål that has a table,
+  // with the score dot if the exact score is already saved.
   function decorateListCards(c) {
     const cards = findListCards().filter(({ card }) => !card.closest('[data-bcs-popup]') && !card.querySelector('[data-bcs-popup]'));
-    const t = cards.length ? tableFor(c) : null;
-    if (!t) {
+    const ts = cards.length ? tablesFor(c) : [];
+    if (!ts.length) {
       resetList();
       if (c.apiKey) decorateListButtons(cards, c);
       return;
     }
-    if (t !== 'loading') locateCards(cards);
+    if (ts.some((x) => x.t !== 'loading')) locateCards(cards);
     const sig = settingsSig(c);
-    for (const x of cards) x.est = estimateItem(x.line, x.id, c, t, sig);
-    filterList(cards, c, t);
+    for (const x of cards) x.est = estimateItems(x.line, x.id, c, ts, sig);
+    filterList(cards, c, ts);
   }
 
-  // One "ca 34 min till Göteborg C" item in a card's facts line. Only touches the page when something changed.
-  function estimateItem(line, id, c, t, sig) {
+  // One "ca 34 min till Göteborg C" item per table in a card's facts line. Only touches the page when something changed.
+  // Returns the longest estimate, or null when any of them is unknown.
+  function estimateItems(line, id, c, ts, sig) {
     line.querySelectorAll('[data-bcs-card], [data-bcs-btn]').forEach((e) => e.remove());
-    let el = line.querySelector('[data-bcs-est]');
-    if (el && el.dataset.bcsEst !== id) { el.remove(); el = null; }
-    if (!el) {
-      el = makeCardItem(line);
-      if (!el) return null;
-      el.setAttribute('data-bcs-est', id);
-      line.appendChild(el);
-    }
+    const keys = ts.map((x) => `${id}:${x.meta.key}`);
+    line.querySelectorAll('[data-bcs-est]').forEach((el) => { if (!keys.includes(el.dataset.bcsEst)) el.remove(); });
     const p = knownPos(id);
-    const ready = t !== 'loading' && p !== undefined;
-    const e = ready && p ? estimate(p, c, t) : null;
     const sc = savedScore(id, c, sig);
-    const text = ready ? estText(e, c) : 'pendling …';
-    const extra = sc != null ? dotHtml(tone(sc)) : '';
-    const title = !ready ? '' : (p ? estTitle(e, t, c) : 'Bostadens position hittades inte.') + (sc != null ? ` Pendlingspoäng ${sc} av 100.` : '');
-    const key = `${text}|${extra}|${title}`;
-    if (el._key !== key) {
-      el._key = key;
-      setCardItem(el, text, extra);
-      el.title = title;
-    }
-    return e;
+    let worst = null, unknown = false;
+    ts.forEach((x, i) => {
+      let el = line.querySelector(`[data-bcs-est="${keys[i]}"]`);
+      if (!el) {
+        el = makeCardItem(line);
+        if (!el) return;
+        el.setAttribute('data-bcs-est', keys[i]);
+        line.appendChild(el);
+      }
+      const ready = x.t !== 'loading' && p !== undefined;
+      const e = ready && p ? estimate(p, c, x.t) : null;
+      if (!e) unknown = true;
+      else if (!worst || e.mins > worst.mins) worst = e;
+      const text = ready ? estText(e, x.meta) : `… till ${x.meta.label}`;
+      const extra = i === 0 && sc != null ? dotHtml(tone(sc)) : '';
+      const title = !ready ? '' : (p ? estTitle(e, x.t, c) : 'Bostadens position hittades inte.') + (i === 0 && sc != null ? ` Pendlingspoäng ${sc} av 100.` : '');
+      const key = `${text}|${extra}|${title}`;
+      if (el._key !== key) {
+        el._key = key;
+        setCardItem(el, text, extra);
+        el.title = title;
+      }
+    });
+    return unknown ? null : worst;
   }
 
   // ---------- filter bar ----------
@@ -1848,13 +1870,13 @@
   const setStyle = (el, prop, v) => { if (el.style[prop] !== v) el.style[prop] = v; };
 
   // Hide or dim listings over the limit, and order the loaded cards by commute (Booli's own sort is left alone).
-  function filterList(cards, c, t) {
+  function filterList(cards, c, ts) {
     const box = listBox(cards);
     if (!box || box === document.body || box === document.documentElement) return;
     if (!filterBar) filterBar = makeFilterBar();
     if (filterBar.nextElementSibling !== box) box.before(filterBar);
     const max = +c.list.max || 0;
-    const label = `Max pendling till ${tableLabel(c)}`;
+    const label = ts.length === 1 ? `Max pendling till ${ts[0].meta.label}` : 'Max pendling till alla resmål';
     const q = (f) => filterBar.querySelector(`[data-f="${f}"]`);
     if (filterBar.querySelector('[data-l="max"]').textContent !== label) filterBar.querySelector('[data-l="max"]').textContent = label;
     if (q('max').value !== String(max)) q('max').value = String(max);
@@ -2370,25 +2392,29 @@
     }
 
     function secLists() {
-      const meta = TABLES.find((t) => t.key === d.list.table);
-      const t = meta ? tableNow(meta.key) : null;
-      const inDests = meta && d.destinations.some((x) => x.lat && haversineKm(x, meta) < 0.5);
-      const when = !meta ? '' : t
-        ? `Tidtabell från ${fmtDay(t.data.serviceDate)}, framme ${t.data.arriveBy}.${t.stale ? ` Tidtabellen är ${t.ageDays} dagar gammal.` : ''}`
-        : 'Tidtabellen hämtas första gången du ser en lista.';
+      const on = d.list.table !== 'off';
+      // Which of your resmål have a published table, and how old it is.
+      const status = d.destinations.map((x) => {
+        const m = tableMetaFor(x);
+        const t = m && tableNow(m.key);
+        const what = !m ? 'ingen tidtabell än, visar knappen Visa pendling'
+          : t ? `tidtabell från ${fmtDay(t.data.serviceDate)}, framme ${t.data.arriveBy}${t.stale ? `. Tidtabellen är ${t.ageDays} dagar gammal` : ''}`
+          : 'tidtabellen hämtas första gången du ser en lista';
+        return `<li>${esc(x.name)}: ${esc(what)}</li>`;
+      }).join('');
       const opt = (v, label, cur) => `<option value="${v}" ${String(v) === String(cur) ? 'selected' : ''}>${esc(label)}</option>`;
       return `<section><h3>Listor och kartan</h3>
-        <p class="hint">Varje bostad i sökresultaten får en ungefärlig restid, räknad från en tidtabell som uppdateras varje vecka. Det behövs ingen nyckel och inga anrop till Trafiklab. På bostadssidan räknas restiden exakt.</p>
+        <p class="hint">Varje bostad i sökresultaten får en ungefärlig restid till dina resmål, räknad från en tidtabell som uppdateras varje vecka. Det behövs ingen nyckel och inga anrop till Trafiklab. På bostadssidan räknas restiden exakt.</p>
         <div class="grid2">
-          <div class="field"><label for="lt">Restid till</label>
-            <select id="lt" class="wide" data-k="lt" data-f="listTable">${TABLES.map((x) => opt(x.key, x.label, d.list.table)).join('')}${opt('off', 'Visa inte', d.list.table)}</select></div>
-          ${meta ? `<div class="field"><label for="lmax">Max pendling</label>
+          <div class="field"><label for="lt">I listorna</label>
+            <select id="lt" class="wide" data-k="lt" data-f="listTable">${opt('auto', 'Visa ungefärlig restid', on ? 'auto' : 'off')}${opt('off', 'Visa inte', on ? 'auto' : 'off')}</select></div>
+          ${on ? `<div class="field"><label for="lmax">Max pendling, till alla resmål</label>
             <select id="lmax" class="wide" data-k="lmax" data-f="listMax">${opt(0, 'Alla', d.list.max)}${LIST_MAXES.map((m) => opt(m, `${m} min`, d.list.max)).join('')}</select></div>` : ''}
         </div>
-        ${meta ? `<div class="row"><span class="lbl" id="lo-l" style="margin:0">Över gränsen</span>${seg('listOver', [{ v: 'hide', label: 'Dölj' }, { v: 'dim', label: 'Tona ner' }], d.list.over, 'lo-l')}</div>
+        ${on ? `<div class="row"><span class="lbl" id="lo-l" style="margin:0">Över gränsen</span>${seg('listOver', [{ v: 'hide', label: 'Dölj' }, { v: 'dim', label: 'Tona ner' }], d.list.over, 'lo-l')}</div>
           <label class="check solo"><input type="checkbox" data-act="listSort" data-k="listSort" ${d.list.sort ? 'checked' : ''}>Sortera efter pendling</label>
-          ${inDests ? '' : `<p class="note">Lägg till ${esc(meta.name)} som resmål för att se uppskattningarna.</p>`}
-          <p class="note">${esc(when)} Restidstabell: Trafiklab (Samtrafiken).</p>` : ''}
+          ${status ? `<ul class="note" style="padding-left:1.2em">${status}</ul>` : ''}
+          <p class="note">Restidstabell: Trafiklab (Samtrafiken).</p>` : ''}
       </section>`;
     }
 
@@ -2718,7 +2744,7 @@
   function showPlaceholder() {
     if (state.status !== 'loading' || !state.p) return;
     const c = cfg();
-    state.est = estimate(state.p, c, tableFor(c, true));
+    state.est = estimateMain(state.p, c).e;
     if (state.est) render();
   }
 
@@ -2739,10 +2765,7 @@
   // What the list estimates see on this page: the script version, the table, the destination and the cards found.
   GM_registerMenuCommand('Kopiera listdata för felsökning', () => {
     const c = cfg();
-    const meta = TABLES.find((x) => x.key === c.list.table);
-    const stored = meta ? GM_getValue(`table:${meta.key}`, null) : null;
-    const idx = meta ? tableMem.get(meta.key) : null;
-    const t = tableFor(c);
+    const storedAt = (name) => { const x = GM_getValue(`table:${name}`, null); return x ? new Date(x.t).toISOString() : null; };
     const cards = findListCards();
     const anchors = [...document.querySelectorAll('a[href]')].filter((a) => LISTING_HREF.test(a.getAttribute('href') || ''));
     const sample = anchors[0] && (anchors[0].closest('li, article') || anchors[0].parentElement);
@@ -2752,14 +2775,17 @@
       hasKey: !!c.apiKey,
       list: c.list,
       destinations: c.destinations.map((d) => ({ name: d.name, lat: d.lat, lon: d.lon, weight: d.weight })),
-      table: {
-        stored: stored ? { fetched: new Date(stored.t).toISOString(), version: stored.data && stored.data.version, serviceDate: stored.data && stored.data.serviceDate, rows: stored.data && (stored.data.stops || []).length } : null,
-        inMemory: !!idx, failed: meta ? tablesFailed.has(meta.key) : null, state: t && typeof t === 'object' ? 'ready' : t,
-      },
+      index: { fetched: storedAt('index'), failed: tablesFailed.has('index'), tables: (tableNow('index') || TABLES).map((m) => m.key) },
+      tables: c.destinations.map((d) => {
+        const m = tableMetaFor(d);
+        const t = m && tableNow(m.key);
+        return { destination: d.name, table: m ? m.key : null, fetched: m ? storedAt(m.key) : null, failed: m ? tablesFailed.has(m.key) : null,
+          serviceDate: t ? t.data.serviceDate : null, rows: t ? t.stops.length : null };
+      }),
       listingLinks: anchors.length,
       cardsFound: cards.length,
       positionsKnown: cards.filter((x) => knownPos(x.id)).length,
-      estimates: cards.slice(0, 5).map((x) => ({ id: x.id, pos: knownPos(x.id), text: (x.line.querySelector('[data-bcs-est]') || {}).textContent || null })),
+      estimates: cards.slice(0, 5).map((x) => ({ id: x.id, pos: knownPos(x.id), text: [...x.line.querySelectorAll('[data-bcs-est]')].map((e) => e.textContent).join(' · ') || null })),
       filterBar: !!document.querySelector('[data-bcs-filter]'),
       sampleCardHtml: sample ? sample.outerHTML.slice(0, 3000) : null,
     };

@@ -41,6 +41,13 @@ async function download(feed, key, dir) {
 
 // Same content apart from the generation time: no need to commit.
 const sameContent = (a, b) => JSON.stringify({ ...a, generated: '' }) === JSON.stringify({ ...b, generated: '' });
+function writeIfChanged(file, data, what = '') {
+  const text = JSON.stringify(data);
+  const old = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null;
+  if (old && sameContent(old, data)) log(`${file}: oförändrad`);
+  else { writeFileSync(file, text + '\n'); log(`${file}: ${(text.length / 1024).toFixed(0)} kB${what ? `, ${what}` : ''}`); }
+  return text;
+}
 
 async function main() {
   const started = Date.now();
@@ -57,14 +64,14 @@ async function main() {
     const today = args.today || new Date().toISOString().slice(0, 10);
     const tables = await buildTables(dir, config, { today, source: feed.source, log });
     mkdirSync(outDir, { recursive: true });
-    for (const { key, table } of tables) {
-      const file = join(outDir, `travel-times-${key}.json`);
-      const text = JSON.stringify(table);
-      const old = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null;
-      if (old && sameContent(old, table)) log(`${file}: oförändrad`);
-      else { writeFileSync(file, text + '\n'); log(`${file}: ${(text.length / 1024).toFixed(0)} kB, ${table.stops.length} hållplatser`); }
+    // The index tells the userscript which destinations have a table.
+    const index = { version: 1, tables: tables.map(({ table: t }) => t.destination) };
+    writeIfChanged(join(outDir, 'tables.json'), index);
+    for (const [n, { key, table }] of tables.entries()) {
+      const text = writeIfChanged(join(outDir, `travel-times-${key}.json`), table, `${table.stops.length} hållplatser`);
       if (text.length > 300 * 1024) log(`Varning: ${key} är större än 300 kB`);
-      if (process.env.RESROBOT_KEY && config.spotCheck) await spotCheck(table, config.spotCheck, process.env.RESROBOT_KEY, log);
+      // Only the first destination is compared, to keep ResRobot calls down (about 21 per run).
+      if (n === 0 && process.env.RESROBOT_KEY && config.spotCheck) await spotCheck(table, config.spotCheck, process.env.RESROBOT_KEY, log);
     }
   } finally {
     if (tmp) rmSync(tmp, { recursive: true, force: true });

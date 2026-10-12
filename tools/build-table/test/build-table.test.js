@@ -19,7 +19,7 @@ const row = (name) => {
 
 test('picks the next normal Tuesday at least a week ahead', () => {
   assert.equal(table.serviceDate, '2026-10-20');
-  assert.deepEqual(table.destination, { key: 'gbg-c', name: 'Göteborg Centralstation', lat: 57.7089, lon: 11.9735 });
+  assert.deepEqual(table.destination, { key: 'gbg-c', name: 'Göteborg Centralstation', label: 'Göteborg Centralstation', lat: 57.7089, lon: 11.9735 });
 });
 
 test('direct trip', () => {
