@@ -24,7 +24,7 @@ const TABLE = {
   ],
 };
 const P = { lat: 57.65, lon: 12.0 };
-const meta = (t) => ({ ...t.destination, label: t.destination.label || 'Göteborg C' });
+const meta = (t) => ({ ...t.destination, label: t.destination.label || 'Göteborg C', generated: t.generated });
 const INDEX = (...tables) => ({ t: Date.now(), data: { version: 1, tables: tables.map(meta) } });
 // A second destination at Lindholmen, with every stop 10 min further away.
 const LINDHOLMEN = { ...TABLE, destination: { key: 'lindholmen', name: 'Lindholmen', label: 'Lindholmen', lat: 57.70675, lon: 11.93835 },
