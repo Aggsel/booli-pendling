@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.13.0
+// @version      1.13.1
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -2008,11 +2008,6 @@
   function buildPanelSection(p) {
     const section = stripIds(p.sec.cloneNode(false));
     section.setAttribute('data-bcs-panel', '');
-    // Heading: the Bostadstyp heading, and whatever wraps it in the section, with new text.
-    const headItem = childOf(p.sec, p.head);
-    const head = stripIds(headItem.cloneNode(true));
-    leafWith(head, /^Bostadstyp$/).textContent = 'Pendling';
-    section.appendChild(head);
     // Tiles: on and off looks from Booli's own tiles.
     const onTile = p.tiles.find(tileOn), offTile = p.tiles.find((t) => !tileOn(t)) || p.tiles[0];
     const tileGrid = lca(p.tiles.length > 1 ? p.tiles : [p.tiles[0], p.tiles[0]]) || p.tiles[0].parentElement;
@@ -2039,7 +2034,23 @@
     };
     const modeRow = grid([tile('mode', 'transit', '🚆', 'Kollektivt'), tile('mode', 'car', '🚗', 'Bil')], 2);
     modeRow.setAttribute('data-bcs-row', 'mode');
-    section.appendChild(modeRow);
+    // Heading and tiles: copy the Bostadstyp heading with what wraps it, and where the tiles sit in that copy,
+    // put ours instead (so the spacing between heading and tiles is Booli's). Without a shared wrapper, the
+    // heading alone, then our tiles.
+    const headItem = childOf(p.sec, p.head);
+    const head = stripIds(headItem.cloneNode(true));
+    leafWith(head, /^Bostadstyp$/).textContent = 'Pendling';
+    if (headItem.contains(tileGrid) && headItem !== tileGrid) {
+      const path = [];
+      for (let el = tileGrid; el !== headItem; el = el.parentElement) path.unshift([...el.parentElement.children].indexOf(el));
+      let copy = head;
+      for (const n of path) copy = copy.children[n];
+      copy.replaceWith(modeRow);
+      section.appendChild(head);
+    } else {
+      section.appendChild(head);
+      section.appendChild(modeRow);
+    }
     // Fields: Booli's "Minst / Upp till" fields and their two-column layout, with our selects.
     const sel = p.selects[0];
     const fieldOf = (s) => { let f = s; while (f.parentElement && f.parentElement !== p.roomsSec && f.parentElement.querySelectorAll('select').length === 1) f = f.parentElement; return f; };
@@ -2067,7 +2078,7 @@
     const pair = sel ? lca(p.selects.length > 1 ? p.selects.map(fieldOf) : [fieldOf(sel), fieldOf(sel)]) : null;
     const fields = pair && pair !== p.roomsSec ? stripIds(pair.cloneNode(false)) : document.createElement('div');
     if (!pair || pair === p.roomsSec) fields.style.cssText = 'display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px';
-    fields.style.marginTop = '16px';
+    fields.style.marginTop = '24px';
     fields.append(field('Pendling till', 'dest', true), field('Max restid', 'max'), field('Över gränsen', 'over'));
     section.appendChild(fields);
     const sortRow = grid([tile('sort', '', '↕', 'Sortera efter pendling')], 1);
@@ -2126,7 +2137,6 @@
     const max = String(+c.list.max || 0);
     if (q('max').value !== max) q('max').value = max;
     if (q('over').value !== c.list.over) q('over').value = c.list.over;
-    q('over').disabled = !+max;
     const modeRow = panelSection.querySelector('[data-bcs-row="mode"]');
     if (modeRow.hidden === hasCar()) modeRow.hidden = !hasCar(); // only once driving times exist
     const car = carMode(c);

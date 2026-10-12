@@ -274,6 +274,9 @@ const PANEL = `<div id="sokfilter"><h2>Sökfilter</h2><div class="sections">
     <div class="f"><label class="lab">Upp till</label><div class="w"><select class="sel" name="maxRooms"><option>Visa allt</option></select><svg></svg></div></div>
   </div></section>
 </div></div>`;
+// Like the real panel: the Bostadstyp heading and its tiles share one wrapper inside the section.
+const PANEL_WRAPPED = PANEL.replace('<section class="sec"><h3 class="sec-h">Bostadstyp</h3><div class="tiles">', '<section class="sec"><div class="stack"><h3 class="sec-h">Bostadstyp</h3><div class="tiles">')
+  .replace('<span>Gård</span></button></div></section>', '<span>Gård</span></button></div></div></section>');
 const ctl = (doc, f) => doc.querySelector(`[data-bcs-panel] [data-f="${f}"]`);
 const est = (doc, id, key = 'gbg-c') => doc.querySelector(`[data-bcs-est="${id}:${key}"]`);
 const item = (doc, id) => est(doc, id).closest('li');
@@ -570,6 +573,18 @@ test('the controls are a section in Booli\'s Sökfilter panel, built from its ow
   // Booli's own parts are untouched.
   assert.equal(doc.querySelectorAll('[data-bcs-panel]').length, 1);
   assert.equal(doc.querySelector('.sec:not([data-bcs-panel]) button.tile-on span').textContent, 'Villa');
+});
+
+test('when heading and tiles share a wrapper, the section copies the wrapper with our tiles instead of Booli\'s', () => {
+  assert.ok(PANEL_WRAPPED.includes('class="stack"'));
+  const { w } = load({ url: 'https://www.booli.se/sok/till-salu', body: PANEL_WRAPPED + pageHtml, store: STORE });
+  const section = w.document.querySelector('[data-bcs-panel]');
+  const stack = section.querySelector('.stack');
+  assert.equal(stack.querySelector('h3').textContent, 'Pendling');
+  assert.equal(stack.querySelector('[data-bcs-row="mode"]').className, 'tiles');
+  assert.deepEqual([...section.querySelectorAll('span')].map((x) => x.textContent).filter((x) => /Lägenhet|Villa|Gård/.test(x)), [],
+    'none of Booli\'s Bostadstyp tiles came along');
+  assert.equal(w.document.querySelectorAll('button.tile').length, 3 + 3, 'Booli\'s three, and our Kollektivt, Bil and sorting');
 });
 
 test('on the page, one line under Sökfilter says what is active and opens Sökfilter', () => {
