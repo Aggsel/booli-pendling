@@ -39,14 +39,15 @@ function load({ url = 'https://www.booli.se/', body = '', store = {}, before } =
   w.GM_getValue = (k, d) => (values.has(k) ? JSON.parse(JSON.stringify(values.get(k))) : d);
   w.GM_setValue = (k, v) => values.set(k, JSON.parse(JSON.stringify(v)));
   w.GM_xmlhttpRequest = (o) => { requests.push(o.url); setTimeout(() => o.onerror && o.onerror(), 0); };
-  w.GM_registerMenuCommand = () => {};
+  const menu = {};
+  w.GM_registerMenuCommand = (name, fn) => { menu[name] = fn; };
   w.GM_setClipboard = () => {};
   w.fetch = async (u) => { requests.push(String(u)); return { text: async () => '' }; };
   w.__BCS_TEST__ = {};
   if (before) before(w);
   w.eval(SRC);
   opened.push(w);
-  return { w, api: w.__BCS_TEST__, values, requests, close: () => {} };
+  return { w, api: w.__BCS_TEST__, values, requests, menu, close: () => {} };
 }
 
 test('estimate(): walking, cycling, Som längst, direct bike, no stop nearby', () => {
@@ -377,6 +378,29 @@ test('the table is fetched on first use when nothing is stored', async () => {
   const { requests, close } = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml });
   assert.ok(requests.includes('https://raw.githubusercontent.com/Aggsel/booli-pendling/main/data/travel-times-gbg-c.json'));
   close();
+});
+
+test('settings open without document.write, which Firefox refuses to a userscript running in the page', async () => {
+  const before = (w) => {
+    w.focus = () => {};
+    const refuse = () => { throw new w.DOMException('The operation is insecure.', 'SecurityError'); };
+    // Frames have their own Document class, so refuse on every frame's document as it is handed out.
+    const desc = Object.getOwnPropertyDescriptor(w.HTMLIFrameElement.prototype, 'contentDocument');
+    Object.defineProperty(w.HTMLIFrameElement.prototype, 'contentDocument', { configurable: true, get() {
+      const d = desc.get.call(this);
+      if (d) { d.open = refuse; d.write = refuse; }
+      return d;
+    } });
+  };
+  const { w, menu } = load({ url: 'https://www.booli.se/sok/till-salu', body: pageHtml, store: STORE, before });
+  await menu['Pendlingsinställningar']();
+  const frame = w.document.querySelector('iframe[title="Pendlingsinställningar"]');
+  const doc = frame.contentDocument;
+  assert.ok(doc.querySelector('.sheet') && doc.querySelector('style'));
+  const headings = [...doc.querySelectorAll('h3')].map((h) => h.textContent);
+  assert.ok(headings.includes('Vart pendlar du?') && headings.includes('Listor och kartan'), headings.join(', '));
+  doc.querySelector('[data-act="close"]').click();
+  assert.equal(w.document.querySelector('iframe[title="Pendlingsinställningar"]'), null);
 });
 
 test('the listing page without a key asks for it and makes no calls', async () => {

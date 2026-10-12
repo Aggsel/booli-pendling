@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Booli pendlingspoäng
 // @namespace    booli-travel-times
-// @version      1.9.1
+// @version      1.9.2
 // @description  Pendlingspoäng och restider på Booli, direkt under bostadens fakta
 // @homepageURL  https://github.com/Aggsel/booli-pendling
 // @supportURL   https://github.com/Aggsel/booli-pendling/issues
@@ -2500,7 +2500,7 @@
     return Object.keys(cacheMem).filter((k) => k.startsWith(CACHE_NS + 'st:')).length;
   }
 
-  function openSettings(opener) {
+  async function openSettings(opener) {
     const saved = cfg();
     let d = JSON.parse(JSON.stringify(saved)); // the draft; nothing is stored until Spara
     let editingKey = !d.apiKey;
@@ -2523,19 +2523,16 @@
     const sheetHost = document.createElement('iframe');
     sheetHost.title = 'Pendlingsinställningar';
     sheetHost.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;border:0;margin:0;padding:0;z-index:2147483600;background:transparent;color-scheme:light;';
-    document.body.appendChild(sheetHost);
-    const fw = sheetHost.contentWindow;
-    const sr = sheetHost.contentDocument;
+    // The frame gets its whole document through srcdoc: Firefox refuses document.write() from a userscript
+    // that runs in the page (needed to reach Booli's map), with "SecurityError: The operation is insecure".
     const pageFont = getComputedStyle(document.body).fontFamily || 'system-ui, sans-serif';
-    sr.open();
-    sr.write(`<!doctype html><html lang="sv"><head><meta charset="utf-8">
+    const sheetHead = `<meta charset="utf-8">
       <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
       <style>${pageFontFaces()}
         html, body { margin: 0; height: 100%; background: transparent; }
         body { font-family: ${pageFont}, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-text-size-adjust: 100%; }
-        ${SHEET_CSS}</style></head><body></body></html>`);
-    sr.close();
-    sr.body.innerHTML = `
+        ${SHEET_CSS}</style>`;
+    const sheetBody = `
       <div class="backdrop" lang="sv"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="ttl">
         <header>
           <div class="ttl"><h2 id="ttl">Pendling</h2><p class="subtitle">Berätta vart du ska, så räknar vi restiden för varje bostad.</p></div>
@@ -2549,6 +2546,17 @@
           <button class="btn primary" data-act="save" data-k="save">Spara</button>
         </footer>
       </div></div>`;
+    sheetHost.srcdoc = `<!doctype html><html lang="sv"><head>${sheetHead}</head><body>${sheetBody}</body></html>`;
+    await new Promise((resolve) => {
+      sheetHost.addEventListener('load', resolve, { once: true });
+      document.body.appendChild(sheetHost);
+    });
+    const fw = sheetHost.contentWindow;
+    const sr = sheetHost.contentDocument;
+    if (!sr.querySelector('.sheet')) { // no srcdoc support: fill the blank frame through the DOM instead
+      sr.head.innerHTML = sheetHead;
+      sr.body.innerHTML = sheetBody;
+    }
     const $ = (q) => sr.querySelector(q);
     const content = $('.content');
     const status = (t, err) => { $('.status').textContent = t || ''; $('.status').className = 'status' + (err ? ' err' : ''); };
