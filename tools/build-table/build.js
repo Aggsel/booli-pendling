@@ -26,13 +26,24 @@ const FEEDS = {
 async function download(feed, key, dir) {
   const file = join(dir, 'feed.zip');
   log(`Hämtar ${feed.url}`); // never log the key
+  // Trafiklab sometimes answers 5xx for a while; retry network errors and 5xx, fail at once on 4xx.
+  const delays = [30, 120, 300];
   let res;
-  try {
-    res = await fetch(`${feed.url}?key=${encodeURIComponent(key)}`, { headers: { 'Accept-Encoding': 'gzip' } });
-  } catch {
-    throw new Error('Kunde inte hämta tidtabellen: nätverksfel'); // the original error may contain the URL with the key
+  for (let attempt = 0; ; attempt++) {
+    let why;
+    try {
+      res = await fetch(`${feed.url}?key=${encodeURIComponent(key)}`, { headers: { 'Accept-Encoding': 'gzip' } });
+      if (res.ok && res.body) break;
+      why = `HTTP ${res.status}`;
+      if (res.status < 500) throw new Error(`Kunde inte hämta tidtabellen: ${why}`);
+    } catch (e) {
+      if (why) throw e;
+      why = 'nätverksfel'; // the original error may contain the URL with the key
+    }
+    if (attempt === delays.length) throw new Error(`Kunde inte hämta tidtabellen: ${why}`);
+    log(`${why}, försöker igen om ${delays[attempt]} s`);
+    await new Promise((r) => setTimeout(r, delays[attempt] * 1000));
   }
-  if (!res.ok || !res.body) throw new Error(`Kunde inte hämta tidtabellen: HTTP ${res.status}`);
   await pipeline(Readable.fromWeb(res.body), createWriteStream(file));
   const out = join(dir, 'feed');
   execFileSync('unzip', ['-q', '-o', file, '-d', out], { stdio: ['ignore', 'ignore', 'inherit'] });
